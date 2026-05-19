@@ -441,8 +441,8 @@ def update_obj_assets(dom, output_filepath, mesh_info_dict):
             sub_geoms = body_element.getElementsByTagName("geom")
             for geom_element in worldbody_geoms:
                 if geom_element.getAttribute("mesh") == mesh_name:
-                    pos = geom_element.getAttribute("pos")
-                    quat = geom_element.getAttribute("quat")
+                    pos = geom_element.getAttribute("pos") or "0 0 0"
+                    quat = geom_element.getAttribute("quat") or "1 0 0 0"
 
                     parent = geom_element.parentNode
                     parent.removeChild(geom_element)
@@ -450,6 +450,11 @@ def update_obj_assets(dom, output_filepath, mesh_info_dict):
                         sub_geom_local = sub_geom.cloneNode(False)
                         sub_geom_local.setAttribute("pos", pos)
                         sub_geom_local.setAttribute("quat", quat)
+                        # The sub-geom relies on the sub-document's default class for
+                        # type="mesh", which is not preserved when moved to the main
+                        # document. Explicitly set it here to avoid sphere fallback.
+                        if sub_geom_local.hasAttribute("mesh") and not sub_geom_local.hasAttribute("type"):
+                            sub_geom_local.setAttribute("type", "mesh")
                         parent.appendChild(sub_geom_local)
 
     return dom
@@ -487,9 +492,12 @@ def update_non_obj_assets(dom, output_filepath):
         else:
             collision_geom = geom.cloneNode(False)
 
-            # if there is no type associated, make the type sphere explicitly
+            # if there is no type associated, infer it from the mesh attribute
             if not collision_geom.hasAttribute("type"):
-                collision_geom.setAttribute("type", "sphere")
+                if collision_geom.hasAttribute("mesh"):
+                    collision_geom.setAttribute("type", "mesh")
+                else:
+                    collision_geom.setAttribute("type", "sphere")
 
             # set to collision class
             collision_geom.setAttribute("class", "collision")
@@ -511,6 +519,41 @@ def update_non_obj_assets(dom, output_filepath):
             # add the new collision and visual specific elements
             parent.appendChild(collision_geom)
             parent.appendChild(visual_geom)
+
+    # Ensure the visual and collision default classes are defined, since we
+    # assign class="visual" / class="collision" to geoms above and MuJoCo
+    # requires matching <default class="..."> entries to be present.
+    root = dom.documentElement
+    existing_classes = {
+        d.getAttribute("class")
+        for d in root.getElementsByTagName("default")
+        if d.getAttribute("class")
+    }
+    if "visual" not in existing_classes or "collision" not in existing_classes:
+        default_block = dom.createElement("default")
+
+        visual_default = dom.createElement("default")
+        visual_default.setAttribute("class", "visual")
+        visual_geom_default = dom.createElement("geom")
+        visual_geom_default.setAttribute("contype", "0")
+        visual_geom_default.setAttribute("conaffinity", "0")
+        visual_geom_default.setAttribute("group", "2")
+        visual_default.appendChild(visual_geom_default)
+
+        collision_default = dom.createElement("default")
+        collision_default.setAttribute("class", "collision")
+        collision_geom_default = dom.createElement("geom")
+        collision_geom_default.setAttribute("group", "3")
+        collision_default.appendChild(collision_geom_default)
+
+        default_block.appendChild(visual_default)
+        default_block.appendChild(collision_default)
+
+        compiler = root.getElementsByTagName("compiler")
+        if compiler:
+            root.insertBefore(default_block, compiler[0].nextSibling)
+        else:
+            root.insertBefore(default_block, root.firstChild)
 
     return dom
 
