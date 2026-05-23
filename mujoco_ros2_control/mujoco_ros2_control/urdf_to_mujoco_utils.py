@@ -678,6 +678,18 @@ def get_processed_mujoco_inputs(processed_inputs_element):
             for key, value in attr_dict.items():
                 print(f"  {key}: {value}")
 
+        # TODO: implement <wrap_body prefix="..."/> directive.
+        # This directive is intended to wrap all worldbody-level base geoms whose
+        # names start with the given prefix into a dedicated named <body> element,
+        # making the arm roots explicit named bodies in the MJCF rather than loose
+        # geoms directly under <worldbody>. Needed for multi-robot URDFs (e.g. two
+        # UR5e arms) where the URDF-to-MJCF converter places each robot's base
+        # collision geoms directly under <worldbody> instead of grouping them under
+        # a named root body. Without this, the MJCF must be patched by hand after
+        # generation. Example usage in <processed_inputs>:
+        #   <wrap_body prefix="arm_0"/>
+        #   <wrap_body prefix="arm_1"/>
+
     return decompose_dict, cameras_dict, modify_element_dict, lidar_dict
 
 
