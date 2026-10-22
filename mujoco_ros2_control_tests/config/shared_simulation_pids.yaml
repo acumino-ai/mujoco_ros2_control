@@ -1,0 +1,20 @@
+/**:
+  ros__parameters:
+    pid_gains:
+      position:
+        device_a_joint:
+          p: 10000.0
+          i: 0.0
+          d: 280.0
+          u_clamp_max: 50.0
+          u_clamp_min: -50.0
+          i_clamp_max: 1.0
+          i_clamp_min: -1.0
+        device_b_joint:
+          p: 10000.0
+          i: 0.0
+          d: 280.0
+          u_clamp_max: 50.0
+          u_clamp_min: -50.0
+          i_clamp_max: 1.0
+          i_clamp_min: -1.0

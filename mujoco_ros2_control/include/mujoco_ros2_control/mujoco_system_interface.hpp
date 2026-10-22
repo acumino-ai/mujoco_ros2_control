@@ -78,6 +78,8 @@ constexpr char MUJOCO_TYPE_POSE[] = "pose";
 /// Magnetometer: reads a single MJCF `magnetometer` sensor.
 constexpr char MUJOCO_TYPE_MAGNETOMETER[] = "magnetometer";
 
+struct SharedSimulation;
+
 class MujocoSystemInterface : public hardware_interface::SystemInterface
 {
 public:
@@ -358,14 +360,28 @@ private:
   // Logger
   rclcpp::Logger logger_ = rclcpp::get_logger("MujocoSystemInterface");
 
-  // The simulation host: owns the Simulate app, model/data, physics & UI threads,
-  // clock publisher, and reset/pause/step services.
-  std::unique_ptr<MujocoSimulation> simulation_;
+  // Every component in the process that loads the same mujoco_model shares one physics world, so
+  // several controller_managers can each drive part of a scene. Owns the simulation host (Simulate
+  // app, model/data, physics & UI threads, clock, reset/pause/step services) and its ROS node.
+  std::shared_ptr<SharedSimulation> shared_;
 
-  // Provides access to ROS interfaces for elements that require it
+  // The component that created shared_. Only it starts physics, applies keyframes, loads plugins
+  // and publishes scene-wide topics: a second copy of any of these would fight the first.
+  bool is_sim_owner_{ false };
+
+  // Non-owning views into shared_.
+  MujocoSimulation* simulation_{ nullptr };
   std::shared_ptr<rclcpp::Node> mujoco_node_;
-  std::unique_ptr<rclcpp::executors::MultiThreadedExecutor> executor_;
-  std::thread executor_thread_;
+
+  // Claims this component's actuators in shared_, failing if another component already drives one.
+  bool claim_actuators();
+
+  // Stages control_data with every other component's latest command in place of this component's
+  // mirror of the sim, which lags them by up to a cycle and would undo their writes.
+  void stage_control_data(mjData* control_data);
+
+  // MuJoCo actuator ids driven by this component's URDF joints.
+  std::vector<int> owned_actuator_ids_;
 
   // Actuators state publisher
   std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::JointState>> actuator_state_publisher_ = nullptr;
