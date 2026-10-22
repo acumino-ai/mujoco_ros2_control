@@ -23,9 +23,11 @@
 #include <fmt/compile.h>
 #include <fmt/ranges.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -88,6 +90,42 @@ bool is_mimic_joint(const std::string& joint_name, const hardware_interface::Har
 }  // namespace
 namespace mujoco_ros2_control
 {
+/// One physics world per mujoco_model, shared by every component in the process that loads it.
+struct SharedSimulation
+{
+  std::shared_ptr<rclcpp::Node> node;
+  std::unique_ptr<rclcpp::executors::MultiThreadedExecutor> executor;
+  std::thread executor_thread;
+  std::unique_ptr<MujocoSimulation> simulation;
+
+  // PID gains live on the shared node, which only the owner's file configures.
+  std::optional<std::string> pids_config_file;
+
+  // MujocoSimulation holds one reset callback; the owner installs a fan-out over these.
+  std::mutex reset_mutex;
+  std::vector<std::pair<const MujocoSystemInterface*, MujocoSimulation::ResetCallback>> reset_callbacks;
+
+  ~SharedSimulation()
+  {
+    // Stop the services before the simulation they call into goes away.
+    if (executor)
+    {
+      executor->cancel();
+    }
+    if (executor_thread.joinable())
+    {
+      executor_thread.join();
+    }
+    simulation.reset();
+  }
+};
+
+namespace
+{
+std::mutex g_shared_simulations_mutex;
+std::map<std::string, std::weak_ptr<SharedSimulation>> g_shared_simulations;
+}  // namespace
+
 template <typename T>
 void add_items(std::vector<T>& vector, const std::vector<T>& items)
 {
@@ -254,9 +292,21 @@ MujocoSystemInterface::MujocoSystemInterface() = default;
 
 MujocoSystemInterface::~MujocoSystemInterface()
 {
+  // The physics keeps running for other components, so nothing it calls may still point here.
+  if (shared_)
+  {
+    {
+      const std::lock_guard<std::mutex> lock(shared_->reset_mutex);
+      auto& callbacks = shared_->reset_callbacks;
+      callbacks.erase(std::remove_if(callbacks.begin(), callbacks.end(),
+                                     [this](const auto& entry) { return entry.first == this; }),
+                      callbacks.end());
+    }
+  }
+
   // We don't know what plugins are doing with the mj_data pointer, so be
   // sure to kill callback so that nothing can access it on destruction.
-  if (simulation_)
+  if (is_sim_owner_ && simulation_)
   {
     simulation_->set_pre_step_callback(nullptr);
   }
@@ -272,22 +322,15 @@ MujocoSystemInterface::~MujocoSystemInterface()
   plugin_instances_.clear();
   transmission_instances_.clear();
 
-  // Stop the executor
-  if (executor_)
-  {
-    executor_->cancel();
-  }
-  if (executor_thread_.joinable())
-  {
-    executor_thread_.join();
-  }
   if (mj_data_control_)
   {
     mj_deleteData(mj_data_control_);
   }
 
-  // Tear down the actual simulation
-  simulation_.reset();
+  // The last component out tears down the executor and the simulation.
+  simulation_ = nullptr;
+  mujoco_node_.reset();
+  shared_.reset();
 }
 
 hardware_interface::CallbackReturn
@@ -363,29 +406,77 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
     node_options_arguments.push_back(pids_config_file.value());
     node_options.arguments(node_options_arguments);
   }
-  RCLCPP_INFO(get_logger(), "Constructing node and executor...");
-  executor_ = std::make_unique<rclcpp::executors::MultiThreadedExecutor>();
-  mujoco_node_ = std::make_shared<rclcpp::Node>("mujoco_ros2_control_node", node_options);
-  executor_->add_node(mujoco_node_);
-  executor_thread_ = std::thread([this]() { executor_->spin(); });
-  RCLCPP_INFO(get_logger(), "Executor thread started.");
-
-  const std::string mujoco_model_topic =
-      get_hardware_parameter_or(get_hardware_info(), "mujoco_model_topic", "/mujoco_robot_description");
-
-  // Construct the simulation wrapper with the loaded parameters.
-  simulation_ = std::make_unique<MujocoSimulation>();
-  if (!simulation_->initialize(get_node(), model_path, mujoco_model_topic, sim_speed_factor, headless))
   {
-    return hardware_interface::CallbackReturn::ERROR;
+    // Held through initialize(): a second component must not attach to a half-built simulation.
+    const std::lock_guard<std::mutex> lock(g_shared_simulations_mutex);
+    shared_ = g_shared_simulations[model_path].lock();
+    is_sim_owner_ = !shared_;
+    if (is_sim_owner_)
+    {
+      RCLCPP_INFO(get_logger(), "Constructing node and executor...");
+      auto shared = std::make_shared<SharedSimulation>();
+      shared->pids_config_file = pids_config_file;
+      shared->executor = std::make_unique<rclcpp::executors::MultiThreadedExecutor>();
+      shared->node = std::make_shared<rclcpp::Node>("mujoco_ros2_control_node", node_options);
+      shared->executor->add_node(shared->node);
+      shared->executor_thread = std::thread([executor = shared->executor.get()]() { executor->spin(); });
+      RCLCPP_INFO(get_logger(), "Executor thread started.");
+
+      const std::string mujoco_model_topic =
+          get_hardware_parameter_or(get_hardware_info(), "mujoco_model_topic", "/mujoco_robot_description");
+
+      // Construct the simulation wrapper with the loaded parameters.
+      shared->simulation = std::make_unique<MujocoSimulation>();
+      if (!shared->simulation->initialize(shared->node, model_path, mujoco_model_topic, sim_speed_factor, headless))
+      {
+        return hardware_interface::CallbackReturn::ERROR;
+      }
+      shared_ = shared;
+      g_shared_simulations[model_path] = shared_;
+    }
+    else
+    {
+      RCLCPP_INFO(get_logger(), "Attaching '%s' to the running simulation of '%s'.", get_hardware_info().name.c_str(),
+                  model_path.c_str());
+    }
+  }
+  simulation_ = shared_->simulation.get();
+  mujoco_node_ = shared_->node;
+
+  if (!is_sim_owner_)
+  {
+    // Each of these is scene-wide state that only the component that started the simulation sets.
+    if (pids_config_file != shared_->pids_config_file)
+    {
+      RCLCPP_FATAL(get_logger(),
+                   "pids_config_file differs from the one the simulation was started with. PID gains live on the "
+                   "shared node, so every component of one mujoco_model must pass the same file.");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
+    for (const char* key : { "initial_keyframe", "override_start_position_file" })
+    {
+      if (!get_hardware_parameter_or(get_hardware_info(), key, "").empty())
+      {
+        RCLCPP_FATAL(get_logger(),
+                     "'%s' resets the whole scene, so only the first component of a mujoco_model may set it.", key);
+        return hardware_interface::CallbackReturn::ERROR;
+      }
+    }
   }
 
   // Time publisher will be pushed from the simulation wrapper.
-  RCLCPP_INFO(get_logger(), "Constructing publishers.");
-  actuator_state_publisher_ =
-      get_node()->create_publisher<sensor_msgs::msg::JointState>("/mujoco_actuators_states", 100);
-  actuator_state_realtime_publisher_ =
-      std::make_shared<realtime_tools::RealtimePublisher<sensor_msgs::msg::JointState>>(actuator_state_publisher_);
+  if (is_sim_owner_)
+  {
+    RCLCPP_INFO(get_logger(), "Constructing publishers.");
+    actuator_state_publisher_ =
+        get_node()->create_publisher<sensor_msgs::msg::JointState>("/mujoco_actuators_states", 100);
+    actuator_state_realtime_publisher_ =
+        std::make_shared<realtime_tools::RealtimePublisher<sensor_msgs::msg::JointState>>(actuator_state_publisher_);
+  }
+
+  // Physics may already be running for other components, so hold it while this one writes its
+  // initial state into the scene.
+  std::unique_lock<std::recursive_mutex> sim_lock(simulation_->mutex());
 
   // We explicitly check to make sure that all joints have names, otherwise stuff down the line won't work
   int num_joints_without_name = 0;
@@ -413,10 +504,10 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
     return hardware_interface::CallbackReturn::FAILURE;
   }
 
-  // Check for free joint
+  // Check for free joint. Its odometry is scene-wide, so only the owner publishes it.
   std::string odom_free_joint_name =
       get_hardware_parameter_or(get_hardware_info(), "odom_free_joint_name", "floating_base_joint");
-  for (int i = 0; i < simulation_->model()->njnt; ++i)
+  for (int i = 0; is_sim_owner_ && i < simulation_->model()->njnt; ++i)
   {
     const char* joint_name = mj_id2name(simulation_->model(), mjtObj::mjOBJ_JOINT, i);
 
@@ -476,11 +567,28 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
   build_interface_handles();
 #endif
 
-  // Store initial state for reset_world service
+  // Store initial state for reset_world service. Each component captures again once its own initial
+  // pose is in, so the last capture holds every component's.
   simulation_->capture_initial_state();
+  sim_lock.unlock();
 
   // This CB will be triggered by the MujocoSimulation after resettting the sim and qpos/qvel/ctrl have been restored.
-  simulation_->set_reset_callback([this](bool fill_initial_state) { this->reset_simulation_state(fill_initial_state); });
+  {
+    const std::lock_guard<std::mutex> lock(shared_->reset_mutex);
+    shared_->reset_callbacks.emplace_back(this, [this](bool fill_initial_state) {
+      this->reset_simulation_state(fill_initial_state);
+    });
+  }
+  if (is_sim_owner_)
+  {
+    simulation_->set_reset_callback([shared = shared_.get()](bool fill_initial_state) {
+      const std::lock_guard<std::mutex> lock(shared->reset_mutex);
+      for (const auto& [component, callback] : shared->reset_callbacks)
+      {
+        callback(fill_initial_state);
+      }
+    });
+  }
 
 #if !ROS_DISTRO_HUMBLE
   // Verify the update rate
@@ -497,7 +605,10 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
 #endif
 
   // Start the physics thread.
-  simulation_->start_physics_thread();
+  if (is_sim_owner_)
+  {
+    simulation_->start_physics_thread();
+  }
 
   actuator_state_msg_.name.clear();
   for (const auto& actuator : mujoco_actuator_data_)
@@ -505,8 +616,12 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
     actuator_state_msg_.name.push_back(actuator.joint_name);
   }
 
-  // Load MuJoCo ROS2 Control plugins
-  this->load_mujoco_plugins();
+  // Load MuJoCo ROS2 Control plugins. They are configured on the shared node, so a second
+  // component would load every one of them again.
+  if (is_sim_owner_)
+  {
+    this->load_mujoco_plugins();
+  }
 
   // Seed the control state before the component is activated.
   // This prevents issues with unallocated memory the event of read() before write().
