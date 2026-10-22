@@ -86,6 +86,10 @@ if(BUILD_TESTING)
   add_ros_isolated_launch_test(test/direct_match_transmission_launch_test.py
     TIMEOUT 75
   )
+
+  add_ros_isolated_launch_test(test/shared_simulation_launch_test.py
+    TIMEOUT 75
+  )
 endif()
 
 ament_package()

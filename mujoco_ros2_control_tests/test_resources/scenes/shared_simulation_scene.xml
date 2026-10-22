@@ -1,0 +1,13 @@
+<mujoco model="shared_simulation_scene">
+  <include file="../robot/shared_simulation_robot.xml"/>
+
+  <statistic center="0 0 0" extent="0.5"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.1 0.1 0.1" specular="0 0 0"/>
+  </visual>
+
+  <worldbody>
+    <light pos="0 0 2" dir="0 0 -1" directional="true"/>
+  </worldbody>
+</mujoco>
