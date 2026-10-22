@@ -373,6 +373,16 @@ private:
   MujocoSimulation* simulation_{ nullptr };
   std::shared_ptr<rclcpp::Node> mujoco_node_;
 
+  // Claims this component's actuators in shared_, failing if another component already drives one.
+  bool claim_actuators();
+
+  // Stages control_data with every other component's latest command in place of this component's
+  // mirror of the sim, which lags them by up to a cycle and would undo their writes.
+  void stage_control_data(mjData* control_data);
+
+  // MuJoCo actuator ids driven by this component's URDF joints.
+  std::vector<int> owned_actuator_ids_;
+
   // Actuators state publisher
   std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::JointState>> actuator_state_publisher_ = nullptr;
   realtime_tools::RealtimePublisher<sensor_msgs::msg::JointState>::SharedPtr actuator_state_realtime_publisher_ =
