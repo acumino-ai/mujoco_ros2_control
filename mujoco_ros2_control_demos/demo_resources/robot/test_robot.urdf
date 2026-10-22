@@ -249,6 +249,9 @@
 
           <sensor>
             <rangefinder name="lidar" site="rf" />
+            <framequat name="body_quat" objtype="site" objname="base"/>
+            <framepos name="body_pos" objtype="site" objname="base"/>
+            <magnetometer name="body_magnetometer" site="base"/>
           </sensor>
         </raw_inputs>
 
@@ -335,8 +338,6 @@
       <!-- If set to true, will not launch the Simulate App window -->
       <param name="headless">$(arg headless)</param>
 
-      <!-- Publish lidar scans at 10 hz -->
-      <param name="lidar_publish_rate">1.0</param>
     </hardware>
     <joint name="joint1">
       <command_interface name="position"/>
@@ -352,20 +353,6 @@
       <state_interface name="effort"/>
       <state_interface name="torque"/>
     </joint>
-
-    <xacro:if value="$(eval use_transmissions)">
-      <!-- When the transmissions is added to the ros2_control tag, the simulation tries to look
-      for the actuators in the parsed MJCF description. Inorder, to test this setup, we do it by
-      modifying the robot description contents in the test_robot.launch.py-->
-      <transmission name="joint1_trans">
-        <plugin>transmission_interface/SimpleTransmission</plugin>
-        <actuator name="actuator1" role="actuator1"/>
-        <joint name="joint1" role="joint1">
-          <mechanical_reduction>2.0</mechanical_reduction>
-          <offset>0.0</offset>
-        </joint>
-      </transmission>
-    </xacro:if>
 
     <joint name="joint2">
       <command_interface name="position"/>
@@ -402,16 +389,21 @@
     </joint>
 
     <xacro:if value="$(eval use_transmissions)">
-      <!-- When the transmissions is added to the ros2_control tag, the simulation tries to look
-      for the actuators in the parsed MJCF description. Inorder, to test this setup, we do it by
-      modifying the robot description contents in the test_robot.launch.py-->
-      <transmission name="joint2_trans">
-        <plugin>transmission_interface/SimpleTransmission</plugin>
-        <actuator name="actuator2" role="actuator1"/>
-        <joint name="joint2" role="joint1">
+      <!-- When the transmission is added to the ros2_control tag, the simulation tries to look
+      for the actuators in the parsed MJCF description. In order to test this setup, we do it by
+      modifying the robot description contents in 04_transmissions.launch.py -->
+      <transmission name="arm_trans">
+        <plugin>transmission_interface/DifferentialTransmission</plugin>
+        <joint name="joint1" role="joint1">
+          <mechanical_reduction>2.0</mechanical_reduction>
+          <offset>0.0</offset>
+        </joint>
+        <joint name="joint2" role="joint2">
           <mechanical_reduction>0.5</mechanical_reduction>
           <offset>0.0</offset>
         </joint>
+        <actuator name="actuator1" role="actuator1"/>
+        <actuator name="actuator2" role="actuator2"/>
       </transmission>
     </xacro:if>
 
@@ -424,10 +416,7 @@
       <param name="depth_topic">/camera/aligned_depth_to_color/image_raw</param>
     </sensor>
 
-    <!-- Lidar sensors are matched to a set of rangefinder sensors in the MJCF, which should be -->
-    <!-- generated with the "<lidar>" inputs in the conversion script. The consiste of N rangefinders -->
-    <!-- and will generally be of the form "<sensor_name>-01". These parameters should line up with -->
-    <!-- those documented in the laserscan message. -->
+    <!-- WARNING: These lidar sensors are deprecated, including for test and legacy support only! -->
     <sensor name="lidar">
       <param name="frame_name">lidar_sensor_frame</param>
       <param name="angle_increment">0.025</param>
@@ -437,5 +426,29 @@
       <param name="range_max">10</param>
       <param name="laserscan_topic">/scan</param>
     </sensor>
+
+    <sensor name="pose">
+      <param name="mujoco_type">pose</param>
+      <param name="mujoco_sensor_name">body</param>
+
+      <state_interface name="position.x" />
+      <state_interface name="position.y" />
+      <state_interface name="position.z" />
+
+      <state_interface name="orientation.x" />
+      <state_interface name="orientation.y" />
+      <state_interface name="orientation.z" />
+      <state_interface name="orientation.w" />
+    </sensor>
+
+    <sensor name="magnetometer">
+      <param name="mujoco_type">magnetometer</param>
+      <param name="mujoco_sensor_name">body_magnetometer</param>
+
+      <state_interface name="magnetic_field.x" />
+      <state_interface name="magnetic_field.y" />
+      <state_interface name="magnetic_field.z" />
+    </sensor>
+
   </ros2_control>
 </robot>

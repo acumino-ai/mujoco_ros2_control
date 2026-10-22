@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-#
 # Copyright 2026 PAL Robotics S.L.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -22,7 +20,8 @@ Transmissions allow mapping between actuators and joints with mechanical
 reduction ratios and offsets.
 
 Key concepts:
-- SimpleTransmission interface from transmission_interface
+- DifferentialTransmission interface from transmission_interface, coupling
+  joint1/joint2 through a shared pair of actuators
 - Mechanical reduction configuration (gear ratios)
 - Actuator-to-joint mapping in MJCF
 - Runtime MJCF modification to rename joints to actuators

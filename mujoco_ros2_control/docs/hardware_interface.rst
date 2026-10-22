@@ -38,9 +38,6 @@ Specify it in your URDF and point to a valid MJCF on launch:
             Defaults to /mujoco_robot_description. -->
        <param name="mujoco_model_topic">/mujoco_robot_description</param>
 
-       <!-- Optional: lidar LaserScan publish rate in Hz (all lidar sensors share one rate). -->
-       <param name="lidar_publish_rate">10.0</param>
-
        <!-- Optional: run the simulator without a GUI window. Defaults to false. -->
        <param name="headless">false</param>
 
@@ -76,6 +73,8 @@ Joints
 ------
 
 Joints in the ``ros2_control`` interface are mapped to actuators defined in the MJCF, either directly or as transmission interfaces.
+If a joint is listed in a ``<transmission>`` and also has an MJCF actuator driving a joint of the same name, the transmission is applied to both commands and states.
+For example, a ``SimpleTransmission`` with ``mechanical_reduction`` 2.0 drives the actuator to twice the joint command and reports half the actuator position as the joint state.
 The system supports different joint control modes based on the actuator type and available command interfaces.
 
 MuJoCo's PD-level ``ctrl`` input is used for direct position, velocity, or effort control.
@@ -118,19 +117,27 @@ Maps to the following ``ros2_control`` hardware interface:
    * - Command Interface
      - MuJoCo ``position``
      - MuJoCo ``velocity``
+     - MuJoCo ``intvelocity``
      - MuJoCo ``motor``, ``general``, etc.
    * - **position**
      - Native support
      - Supported using PIDs
      - Supported using PIDs
+     - Supported using PIDs
    * - **velocity**
      - Not supported
+     - Native support
      - Native support
      - Supported using PIDs
    * - **effort**
      - Not supported
      - Not supported
+     - Not supported
      - Native support
+
+MuJoCo's ``intvelocity`` actuator integrates its ``ctrl`` input into an internal position setpoint. The input itself has
+velocity semantics, so it maps natively to a ros2_control ``velocity`` command interface without changing the actuator's
+integrated-velocity dynamics.
 
 .. note::
 
@@ -167,19 +174,21 @@ The drivers expose control and state for that single joint, while the simulation
 Sensors
 -------
 
-The hardware interface supports force-torque sensors (FTS) and inertial measurement units (IMUs).
+The hardware interface supports force-torque sensors (FTS), inertial measurement units (IMUs), pose sensors, and magnetometers.
 MuJoCo does not model complete FTS and IMUs natively, so we combine supported MJCF sensor constructs to map to a single ``ros2_control`` sensor.
 
 Force-Torque Sensors
 ~~~~~~~~~~~~~~~~~~~~
 
-Model ``force`` and ``torque`` sensors separately in the MJCF, suffixed with ``_force`` and ``_torque``:
+Model ``force`` and ``torque`` sensors separately in the MJCF, suffixed with ``_force`` and ``_torque``.
+Each optionally takes a ``noise`` attribute (standard deviation, in N / N*m) to add zero-mean Gaussian noise
+to its readings, see :ref:`Sensor Noise <sensor_noise>` below:
 
 .. code-block:: xml
 
    <sensor>
-     <force name="fts_sensor_force" site="ft_frame"/>
-     <torque name="fts_sensor_torque" site="ft_frame"/>
+     <force name="fts_sensor_force" site="ft_frame" noise="0.0"/>
+     <torque name="fts_sensor_torque" site="ft_frame" noise="0.0"/>
    </sensor>
 
 Map them to a single ``ros2_control`` sensor:
@@ -204,14 +213,16 @@ Map them to a single ``ros2_control`` sensor:
 IMU
 ~~~
 
-Simulate a ``framequat``, ``gyro``, and ``accelerometer`` as a single IMU:
+Simulate a ``framequat``, ``gyro``, and ``accelerometer`` as a single IMU. Each optionally takes a ``noise``
+attribute (standard deviation) to add zero-mean Gaussian noise to its readings, see
+:ref:`Sensor Noise <sensor_noise>` below:
 
 .. code-block:: xml
 
    <sensor>
-     <framequat name="imu_sensor_quat" objtype="site" objname="imu_sensor"/>
-     <gyro name="imu_sensor_gyro" site="imu_sensor"/>
-     <accelerometer name="imu_sensor_accel" site="imu_sensor"/>
+     <framequat name="imu_sensor_quat" objtype="site" objname="imu_sensor" noise="0.0"/>
+     <gyro name="imu_sensor_gyro" site="imu_sensor" noise="0.0"/>
+     <accelerometer name="imu_sensor_accel" site="imu_sensor" noise="0.0"/>
    </sensor>
 
 Map to the corresponding ``ros2_control`` sensor:
@@ -240,51 +251,84 @@ Map to the corresponding ``ros2_control`` sensor:
 
 These sensor state interfaces work out of the box with the standard ROS 2 broadcasters.
 
-.. warning::
+Magnetometer
+~~~~~~~~~~~~
 
-   Cameras are no longer supported in the base interface, they are now provided as a ``mujoco_ros2_control_plugin``.
-   Refer to the :ref:`camera_plugin` for more information.
-
-Lidar
------
-
-MuJoCo does not include native lidar support.
-This package implements a ROS 2-like lidar by wrapping sets of
-`rangefinders <https://mujoco.readthedocs.io/en/stable/XMLreference.html#sensor-rangefinder>`_ together.
-
-MuJoCo rangefinders measure the distance to the nearest surface along the positive ``Z`` axis of the sensor site.
-The first rangefinder's ``Z`` axis (e.g. ``rf-00``) must align with the ROS 2 lidar sensor's positive ``X`` axis,
-consistent with the `LaserScan <https://github.com/ros2/common_interfaces/blob/rolling/sensor_msgs/msg/LaserScan.msg#L10>`_ convention.
-
-Use the ``replicate`` tag to add N sites at regular angular offsets:
-
-.. code-block:: xml
-
-   <replicate count="12" sep="-" offset="0 0 0" euler="0 0.025 0">
-     <site name="rf" size="0.01" pos="0.0 0.0 0.0" quat="0.0 0.0 0.0 1.0"/>
-   </replicate>
-
-Attach rangefinder sensors to each site:
+Model a MuJoCo ``magnetometer`` sensor in the MJCF. It optionally takes a ``noise`` attribute (standard
+deviation) to add zero-mean Gaussian noise to its readings, see :ref:`Sensor Noise <sensor_noise>` below:
 
 .. code-block:: xml
 
    <sensor>
-     <rangefinder name="lidar" site="rf"/>
+     <magnetometer name="magnetometer_sensor" site="imu_sensor" noise="0.0"/>
    </sensor>
 
-Configure the lidar through ``ros2_control`` xacro:
+Map it to the corresponding ``ros2_control`` sensor:
 
 .. code-block:: xml
 
-   <sensor name="lidar">
-     <param name="frame_name">lidar_sensor_frame</param>
-     <param name="angle_increment">0.025</param>
-     <param name="min_angle">-0.3</param>
-     <param name="max_angle">0.3</param>
-     <param name="range_min">0.05</param>
-     <param name="range_max">10</param>
-     <param name="laserscan_topic">/scan</param>
+   <sensor name="magnetometer_sensor">
+     <param name="mujoco_type">magnetometer</param>
+     <!-- mujoco_sensor_name does not need to match the ros2_control sensor name -->
+     <param name="mujoco_sensor_name">magnetometer_sensor</param>
+     <state_interface name="magnetic_field.x"/>
+     <state_interface name="magnetic_field.y"/>
+     <state_interface name="magnetic_field.z"/>
    </sensor>
+
+.. _sensor_noise:
+
+Sensor Noise
+~~~~~~~~~~~~
+
+Every MJCF sensor element used above (``force``, ``torque``, ``framequat``, ``gyro``, ``accelerometer``,
+``framepos``, ``magnetometer``) accepts MuJoCo's native ``noise`` attribute: the standard deviation, in the
+sensor's native units, of the noise added to its reading. It defaults to ``0`` (no noise). Noise magnitude is
+entirely driven by the MJCF, e.g.:
+
+.. code-block:: xml
+
+   <sensor>
+     <force name="fts_sensor_force" site="ft_frame" noise="0.5"/>
+     <torque name="fts_sensor_torque" site="ft_frame" noise="0.05"/>
+   </sensor>
+
+.. note::
+
+   MuJoCo compiles ``noise`` into ``mjModel::sensor_noise`` but does not apply it itself (``mj_step`` leaves
+   ``sensordata`` noise-free) — it's normally left for tools like the ``simulate`` GUI to apply for display.
+   This hardware interface applies it on every ``read()``, using its own RNG per ``ros2_control`` sensor
+   (seeded from ``std::random_device``, so the noise sequence differs between runs; there is no seed
+   parameter).
+
+MJCF has no concept of noise *shape* though — ``noise`` only ever means "standard deviation of zero-mean
+noise". Choose the shape with the ``ros2_control`` ``noise_distribution`` parameter, applying to every field
+of that sensor:
+
+.. code-block:: xml
+
+   <sensor name="fts_sensor">
+     <param name="mujoco_type">fts</param>
+     <param name="mujoco_sensor_name">fts_sensor</param>
+     <!-- "gaussian" (default) or "uniform" -->
+     <param name="noise_distribution">gaussian</param>
+     ...
+   </sensor>
+
+``uniform`` draws from ``[-stddev*sqrt(3), stddev*sqrt(3)]``, so its actual standard deviation still matches
+the configured MJCF ``noise`` value — switching distributions doesn't change the noise magnitude, only its
+shape (bounded vs. unbounded tails).
+
+For an IMU, the configured ``noise`` values are also surfaced as the diagonal of that field's (previously
+always-zero) covariance state interfaces (e.g. ``orientation_covariance.0``), for controllers that consume a
+covariance estimate.
+
+.. warning::
+
+   Cameras and lidar sensors are no longer supported in the base interface, they are now provided as ``mujoco_ros2_control_plugins``.
+   Refer to the :ref:`CameraPlugin <camera_plugin>` and :ref:`RangefinderLidarPlugin <rangefinder_lidar_plugin>` for more information.
+
+.. _simulation_topics_and_services:
 
 Simulation Topics and Services
 ================================
@@ -317,11 +361,30 @@ Services
       ros2 service call /ros2_control_node/set_pause mujoco_ros2_control_msgs/srv/SetPause "{paused: false}"
 
 ``~/reset_world`` (``mujoco_ros2_control_msgs/srv/ResetWorld``)
-   Resets the simulation state.
+   Resets the simulation state, optionally applying per-joint state overrides on top of the restored state.
 
    - If the optional ``keyframe`` string field is empty, the simulation is restored to the state captured at startup (initial joint positions, velocities, and control values).
    - If a ``keyframe`` name is provided, that named keyframe from the MJCF is applied instead.
+   - ``state_overrides`` (``mujoco_ros2_control_msgs/SimulationState``): optional overrides applied on top of the
+     restored state — ``joint_states`` for single-DOF (hinge/slide) joints keyed by MuJoCo joint name, and
+     ``free_joints`` for free joints keyed by the name of the body each one drives.
+     The split follows the representation: ``joint_states`` carries raw scalar joint coordinates, while
+     ``free_joints`` carries a frame-relative Cartesian pose and twist. Ball and other multi-DOF joints fit
+     neither and are not supported.
+   - In ``joint_states``, ``position`` and ``velocity`` must each be empty or the same length as ``name``, so a given
+     field is set for every listed joint or for none of them; an empty array leaves that field at its reset value.
+     ``effort`` is not supported and must be empty.
+   - In ``free_joints``, entries behave exactly like the ``~/set_free_joint_state`` service (see below), except that any
+     ``pose``/``twist`` ``frame_id`` is resolved against body poses *after* the reset and *after* any ``joint_states``
+     overrides have been written. An object can therefore be placed relative to where another body ends up, rather than
+     where it was before the reset.
    - Returns ``success`` and a human-readable ``message``.
+
+   .. note::
+
+      There is no standalone service for setting a single-DOF joint; unlike free-joint bodies, articulated joints are
+      usually actuated, so writing one has to re-sync the hardware interface's command interfaces and reset its PIDs.
+      That reconciliation only happens as part of a reset, which is why the capability lives here.
 
    .. code-block:: bash
 
@@ -331,10 +394,24 @@ Services
       # Reset to a named MJCF keyframe
       ros2 service call /ros2_control_node/reset_world mujoco_ros2_control_msgs/srv/ResetWorld "{keyframe: 'home'}"
 
+      # Reset to a keyframe, but with the cabinet door open and "box_1" placed on the table
+      ros2 service call /ros2_control_node/reset_world mujoco_ros2_control_msgs/srv/ResetWorld \
+        "{keyframe: 'home',
+          state_overrides: {
+            joint_states: {name: ['door_hinge'], position: [1.57]},
+            free_joints: [
+              {name: 'box_1', pose: {header: {frame_id: 'table'}, pose: {position: {z: 0.4}}}}
+            ]
+          }
+        }"
+
    .. important::
 
       If controllers are active during the service call, the robot may reset to the initial state and then immediately
       snap back to its previous commanded position. Deactivate any active joint controllers before calling this service.
+      This applies equally to ``state_overrides.joint_states`` targeting controlled joints: the hardware interface re-syncs
+      its command interfaces to the overridden positions as part of the reset, but an active controller may still
+      command the joints elsewhere on its next update.
 
 ``~/step_simulation`` (``mujoco_ros2_control_msgs/srv/StepSimulation``)
    Advances the paused simulation by an exact number of physics steps and blocks until all steps have completed.
@@ -349,6 +426,63 @@ Services
 
       # Step the simulation forward by 100 physics steps
       ros2 service call /ros2_control_node/step_simulation mujoco_ros2_control_msgs/srv/StepSimulation "{steps: 100}"
+
+``~/set_free_joint_state`` (``mujoco_ros2_control_msgs/srv/SetFreeJointState``)
+   Directly sets the pose and velocity of one or more MuJoCo free-joint objects (e.g. manipulable
+   props) in a single call, each identified by the name of the body its free joint drives. Useful
+   for teleporting or resetting object poses.
+
+   - ``free_joints`` (``mujoco_ros2_control_msgs/FreeJointState[]``): list of free-joint
+     bodies to set. Each entry has:
+
+     - ``name`` (``string``): name of the MuJoCo body driven by the target free joint.
+     - ``pose`` (``geometry_msgs/PoseStamped``): desired pose. An unset ``orientation``
+       defaults to identity. ``pose.header.frame_id`` selects the reference frame: empty
+       (default) means the world frame; set to the name of another MuJoCo body to compose
+       ``pose.pose`` onto that body's current world pose, letting you place an object relative
+       to a link instead of computing its world pose yourself. ``pose.header.stamp`` is not
+       used.
+     - ``twist`` (``geometry_msgs/TwistStamped``): desired velocity. Left at its default
+       (all-zero), the object comes to rest at the new pose. ``twist.header.frame_id`` selects
+       the reference frame the same way as ``pose.header.frame_id``, but **independently**: if
+       set, ``twist.twist`` is rotated into the world frame using that body's current world
+       orientation (the reference body's own velocity is not added). ``twist.header.stamp`` is
+       not used.
+
+   - ``pose`` and ``twist`` are resolved **independently** -- they may reference different
+     bodies, or one may be world-frame while the other is relative.
+   - Application is **atomic across the whole list**: every entry is validated (body exists, is
+     driven by a free joint, and any ``pose``/``twist`` ``frame_id`` names a known body) before
+     anything is written. Returns ``success = false`` (with no data modified for *any* entry) if
+     a single entry is invalid; ``message`` identifies the offending entry by index and body
+     name.
+   - If the same body name appears more than once in the list, entries are applied in order, so
+     the last one wins.
+   - To *observe* the current state of every free-joint object, see the ``FreeJointPlugin`` in
+     ``mujoco_ros2_control_plugins`` (published on its ``free_joint_states`` topic).
+
+   .. code-block:: bash
+
+      # Teleport "box_1" to (x=0, y=0, z=1) with identity orientation, at rest
+      ros2 service call /ros2_control_node/set_free_joint_state \
+        mujoco_ros2_control_msgs/srv/SetFreeJointState \
+        "{free_joints: [{name: 'box_1', pose: {pose: {position: {x: 0.0, y: 0.0, z: 1.0}}}}]}"
+
+      # Place "box_1" 10 cm above the "gripper_link" body, in that link's frame, while giving
+      # it a world-frame velocity
+      ros2 service call /ros2_control_node/set_free_joint_state \
+        mujoco_ros2_control_msgs/srv/SetFreeJointState \
+        "{free_joints: [{name: 'box_1',
+                         pose: {header: {frame_id: 'gripper_link'}, pose: {position: {z: 0.1}}},
+                         twist: {twist: {linear: {x: 0.2}}}}]}"
+
+      # Teleport both "box_1" and "box_2" in a single, atomic call
+      ros2 service call /ros2_control_node/set_free_joint_state \
+        mujoco_ros2_control_msgs/srv/SetFreeJointState \
+        "{free_joints: [
+          {name: 'box_1', pose: {pose: {position: {x: 0.0, y: 0.0, z: 1.0}}}},
+          {name: 'box_2', pose: {pose: {position: {x: 1.0, y: 0.0, z: 1.0}}}}
+        ]}"
 
 Debugging
 =========
