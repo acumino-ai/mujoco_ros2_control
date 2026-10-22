@@ -81,6 +81,16 @@ class TestFixtureHardwareInterfacesCheck(unittest.TestCase):
             "joint2/velocity",
             "joint2/effort",
             "joint2/torque",
+            "pose/orientation.w",
+            "pose/orientation.x",
+            "pose/orientation.y",
+            "pose/orientation.z",
+            "pose/position.x",
+            "pose/position.y",
+            "pose/position.z",
+            "magnetometer/magnetic_field.x",
+            "magnetometer/magnetic_field.y",
+            "magnetometer/magnetic_field.z",
         ]
         assert len(available_state_interfaces_names) == len(
             expected_state_interfaces

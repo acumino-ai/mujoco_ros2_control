@@ -19,15 +19,18 @@
 
 #include "mujoco_ros2_control/mujoco_simulation.hpp"
 #include "array_safety.h"
+#include "mujoco_ros2_control/sim_display_text.hpp"
+#include "render_loop_exit.hpp"
 
 #include <unistd.h>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <future>
 #include <iostream>
 #include <memory>
@@ -40,7 +43,15 @@
 
 #include <hardware_interface/version.h>
 #include <rclcpp/version.h>
+#include "ament_index_cpp/version.h"
+#if AMENT_INDEX_CPP_VERSION_GTE(1, 13, 2)
+#include <ament_index_cpp/get_package_share_path.hpp>
+#else
 #include <ament_index_cpp/get_package_share_directory.hpp>
+#endif
+#include <ament_index_cpp/get_resource.hpp>
+#include <ament_index_cpp/get_resources.hpp>
+
 #include <rclcpp/rclcpp.hpp>
 #include "lodepng.h"
 
@@ -214,45 +225,14 @@ private:
 static std::string getExecutableDir()
 {
   constexpr char kPathSep = '/';
-  const char* path = "/proc/self/exe";
 
+  // Determine the executable location while respecting symlinks, as the plugins are installed
+  // next to the ros2 control node's executable
   std::string real_path = [&]() -> std::string {
-    std::unique_ptr<char[]> realpath(nullptr);
-    std::uint32_t buf_size = 128;
-    bool success = false;
-    while (!success)
-    {
-      realpath.reset(new (std::nothrow) char[buf_size]);
-      if (!realpath)
-      {
-        std::cerr << "cannot allocate memory to store executable path\n";
-        return "";
-      }
-
-      auto written = readlink(path, realpath.get(), buf_size);
-      if (written < buf_size)
-      {
-        realpath.get()[written] = '\0';
-        success = true;
-      }
-      else if (written == -1)
-      {
-        if (errno == EINVAL)
-        {
-          // path is already not a symlink, just use it
-          return path;
-        }
-
-        std::cerr << "error while resolving executable path: " << strerror(errno) << '\n';
-        return "";
-      }
-      else
-      {
-        // realpath is too small, grow and retry
-        buf_size *= 2;
-      }
-    }
-    return realpath.get();
+    std::ifstream f("/proc/self/cmdline");
+    std::string argv0;
+    std::getline(f, argv0, '\0');
+    return argv0;
   }();
 
   if (real_path.empty())
@@ -272,6 +252,46 @@ static std::string getExecutableDir()
   return "";
 }
 
+// Load all .so plugins from a directory, following symlinks, this is different from the upstream
+static void loadPluginsFromDirectory(const std::string& plugin_dir)
+{
+  std::error_code ec;
+  if (!std::filesystem::is_directory(plugin_dir, ec))
+  {
+    return;
+  }
+
+  for (const auto& entry : std::filesystem::directory_iterator(plugin_dir, ec))
+  {
+    if (!entry.is_regular_file(ec))
+    {
+      continue;
+    }
+
+    const auto& path = entry.path();
+    if (path.extension() != ".so")
+    {
+      continue;
+    }
+
+    int before = mjp_pluginCount();
+    mj_loadPluginLibrary(path.c_str());
+    int after = mjp_pluginCount();
+    if (after > before)
+    {
+      std::printf("Plugins registered by library '%s':\n", path.filename().c_str());
+      for (int i = before; i < after; ++i)
+      {
+        std::printf("    %s\n", mjp_getPluginAtSlot(i)->name);
+      }
+    }
+    else
+    {
+      std::printf("No plugins loaded from: '%s':\n", path.filename().c_str());
+    }
+  }
+}
+
 // scan for libraries in the plugin directory to load additional plugins
 static void scanPluginLibraries()
 {
@@ -286,26 +306,40 @@ static void scanPluginLibraries()
     }
   }
 
-  const std::string sep = "/";
-
   // try to open the ${EXECDIR}/MUJOCO_PLUGIN_DIR directory
   // ${EXECDIR} is the directory containing the simulate binary itself
   // MUJOCO_PLUGIN_DIR is the MUJOCO_PLUGIN_DIR preprocessor macro
   const std::string executable_dir = getExecutableDir();
-  if (executable_dir.empty())
+  if (!executable_dir.empty())
   {
-    return;
+    const std::string plugin_dir = executable_dir + "/" + MUJOCO_PLUGIN_DIR;
+    loadPluginsFromDirectory(plugin_dir);
   }
 
-  const std::string plugin_dir = getExecutableDir() + sep + MUJOCO_PLUGIN_DIR;
-  mj_loadAllPluginLibraries(
-      plugin_dir.c_str(), +[](const char* filename, int first, int count) {
-        std::printf("Plugins registered by library '%s':\n", filename);
-        for (int i = first; i < first + count; ++i)
-        {
-          std::printf("    %s\n", mjp_getPluginAtSlot(i)->name);
-        }
-      });
+  // Then try to find all packages that registered mujoco plugins via the ament resource index
+  // get_resources/get_resource were deprecated in https://github.com/ament/ament_index/pull/120
+#if AMENT_INDEX_CPP_VERSION_GTE(1, 13, 2)
+  auto plugins = ament_index_cpp::get_resources_by_name("mujoco_plugins");
+  for (const auto& [package_name, _] : plugins)
+  {
+    auto resource = ament_index_cpp::get_resource("mujoco_plugins", package_name);
+    if (resource.resourcePath.has_value())
+    {
+      const std::string plugin_dir = (resource.resourcePath.value() / resource.contents).string();
+#else
+  auto plugins = ament_index_cpp::get_resources("mujoco_plugins");
+  for (const auto& [package_name, _] : plugins)
+  {
+    std::string content;
+    std::string prefix;
+    if (ament_index_cpp::get_resource("mujoco_plugins", package_name, content, &prefix))
+    {
+      const std::string plugin_dir = prefix + "/" + content;
+#endif
+      std::printf("Loading MuJoCo plugins from package '%s': %s\n", package_name.c_str(), plugin_dir.c_str());
+      loadPluginsFromDirectory(plugin_dir);
+    }
+  }
 }
 
 //------------------------------------------- simulation
@@ -411,7 +445,7 @@ static mjModel* loadModelFromTopic(rclcpp::Node::SharedPtr node, const std::stri
   {
     auto now = std::chrono::steady_clock::now();
 
-    RCLCPP_INFO_THROTTLE(node->get_logger(), *node->get_clock(), 1000, "Waiting for /mujoco_robot_description...");
+    RCLCPP_INFO_THROTTLE(node->get_logger(), *node->get_clock(), 1000, "Waiting for '%s'...", topic_name.c_str());
 
     if (now - start > timeout)
     {
@@ -429,8 +463,14 @@ static mjModel* loadModelFromTopic(rclcpp::Node::SharedPtr node, const std::stri
 
     mjSpec* spec = nullptr;
     spec = mj_parseXMLString(robot_description.c_str(), nullptr, error, 1000);
-    mnew = mj_compile(spec, nullptr);
+    if (!spec)
+    {
+      RCLCPP_FATAL(node->get_logger(), "Failed to parse spec from XML topic string: %s", error);
+      mj_deleteSpec(spec);
+      return nullptr;
+    }
 
+    mnew = mj_compile(spec, nullptr);
     if (!mnew)
     {
       const char* myerr = mjs_getError(spec);
@@ -473,6 +513,13 @@ MujocoSimulation::~MujocoSimulation()
   {
     mj_deleteData(mj_data_);
   }
+  for (mjData* snapshot : { snapshot_write_, snapshot_read_ })
+  {
+    if (snapshot)
+    {
+      mj_deleteData(snapshot);
+    }
+  }
   if (mj_model_)
   {
     mj_deleteModel(mj_model_);
@@ -482,6 +529,7 @@ MujocoSimulation::~MujocoSimulation()
 bool MujocoSimulation::initialize(rclcpp::Node::SharedPtr node, const std::string& model_path,
                                   const std::string& mujoco_model_topic, double sim_speed_factor, bool headless)
 {
+  explicit_shutdown_requested_.store(false);
   node_ = node;
   model_path_ = model_path;
   mujoco_model_topic_ = mujoco_model_topic;
@@ -537,8 +585,13 @@ bool MujocoSimulation::initialize(rclcpp::Node::SharedPtr node, const std::strin
                                             /* is_passive = */ false);
 
       // Add ros2 control icon for the taskbar
+#if AMENT_INDEX_CPP_VERSION_GTE(1, 13, 2)
+      std::string icon_location =
+          (ament_index_cpp::get_package_share_path("mujoco_ros2_control") / "resources/mujoco_logo.png").string();
+#else
       std::string icon_location =
           ament_index_cpp::get_package_share_directory("mujoco_ros2_control") + "/resources/mujoco_logo.png";
+#endif
       std::vector<unsigned char> image;
       unsigned width, height;
       unsigned error = lodepng::decode(image, width, height, icon_location);
@@ -572,6 +625,12 @@ bool MujocoSimulation::initialize(rclcpp::Node::SharedPtr node, const std::strin
       // Blocks until terminated
       RCLCPP_INFO(get_logger(), "Starting the MuJoCo rendering thread...");
       sim_->RenderLoop();
+
+      if (detail::handle_render_loop_exit(sim_->exitrequest, explicit_shutdown_requested_,
+                                          node_->get_node_base_interface()->get_context()))
+      {
+        RCLCPP_INFO(get_logger(), "MuJoCo rendering window closed; shut down its ROS context.");
+      }
     });
   }
 
@@ -614,6 +673,7 @@ bool MujocoSimulation::initialize(rclcpp::Node::SharedPtr node, const std::strin
   reset_world_cb_group_ = node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   set_pause_cb_group_ = node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   step_simulation_cb_group_ = node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+  set_free_joint_state_cb_group_ = node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
 
   reset_world_service_ = node_->create_service<mujoco_ros2_control_msgs::srv::ResetWorld>(
       "~/reset_world",
@@ -633,6 +693,13 @@ bool MujocoSimulation::initialize(rclcpp::Node::SharedPtr node, const std::strin
       qos_services, step_simulation_cb_group_);
   RCLCPP_INFO(get_logger(), "Created step_simulation service at: %s/step_simulation", node_->get_fully_qualified_name());
 
+  set_free_joint_state_service_ = node_->create_service<mujoco_ros2_control_msgs::srv::SetFreeJointState>(
+      "~/set_free_joint_state",
+      std::bind(&MujocoSimulation::set_free_joint_state_callback, this, std::placeholders::_1, std::placeholders::_2),
+      qos_services, set_free_joint_state_cb_group_);
+  RCLCPP_INFO(get_logger(), "Created set_free_joint_state service at: %s/set_free_joint_state",
+              node_->get_fully_qualified_name());
+
   // Finish initialization by loading the model and initializing the model and control data containers.
   RCLCPP_INFO(get_logger(), "Loading model...");
   mj_model_ = LoadModel(model_path_.c_str(), mujoco_model_topic_, *sim_, node_);
@@ -645,13 +712,38 @@ bool MujocoSimulation::initialize(rclcpp::Node::SharedPtr node, const std::strin
   {
     std::unique_lock<std::recursive_mutex> lock(*sim_mutex_);
     mj_data_ = mj_makeData(mj_model_);
+    snapshot_write_ = mj_makeData(mj_model_);
+    snapshot_read_ = mj_makeData(mj_model_);
+    snapshot_ready_ = false;
 
     // Initialize containers for data sharing
-    xfrc_plugin_desired_.assign(6 * mj_model_->nbody, 0.0);
-    xfrc_viewer_capture_.assign(6 * mj_model_->nbody, 0.0);
-    xfrc_last_written_.assign(6 * mj_model_->nbody, 0.0);
+    ctrl_staged_.assign(mj_model_->nu, 0.0);
+    qfrc_applied_staged_.assign(mj_model_->nv, 0.0);
+    control_inputs_staged_ = false;
+
+    if (mj_data_ && snapshot_write_ && snapshot_read_)
+    {
+      // Seed both snapshot buffers so a consumer that arrives before the first physics-loop
+      // refresh still sees valid initial data.
+      mj_copyData(snapshot_read_, mj_model_, mj_data_);
+      refresh_data_snapshot();
+      publish_control_state();
+    }
+
+    // if there is an id set in the global settings, use that as the initial fixed camera
+    if (mj_model_->vis.global.cameraid >= 0 && mj_model_->vis.global.cameraid < mj_model_->ncam)
+    {
+      sim_->cam.fixedcamid = mj_model_->vis.global.cameraid;
+      sim_->cam.type = mjCAMERA_FIXED;
+    }
+
+    // otherwise use default free camera
+    else
+    {
+      mjv_defaultFreeCamera(mj_model_, &sim_->cam);
+    }
   }
-  if (!mj_data_)
+  if (!mj_data_ || !snapshot_write_ || !snapshot_read_)
   {
     RCLCPP_FATAL(get_logger(), "Could not allocate mjData for '%s'", model_path_.c_str());
     return false;
@@ -689,6 +781,17 @@ void MujocoSimulation::capture_initial_state()
 void MujocoSimulation::set_reset_callback(ResetCallback callback)
 {
   reset_callback_ = std::move(callback);
+}
+
+void MujocoSimulation::set_pre_step_callback(PreStepCallback callback)
+{
+  // Don't drop in a nullptr if requested, just pass an empty function.
+  PreStepCallback next = callback ? std::move(callback) : PreStepCallback([](mjData* /*data*/) {});
+
+  // Plugins may be registered after the physics thread is already running, so the loop
+  // could otherwise be reading pre_step_callback_ while we assign to it.
+  const std::unique_lock<std::recursive_mutex> lock(*sim_mutex_);
+  pre_step_callback_ = std::move(next);
 }
 
 void MujocoSimulation::start_physics_thread()
@@ -730,6 +833,8 @@ void MujocoSimulation::start_physics_thread()
 
 void MujocoSimulation::shutdown()
 {
+  explicit_shutdown_requested_.store(true);
+
   // If sim_ is created and running, clean shut it down
   if (sim_)
   {
@@ -748,6 +853,12 @@ void MujocoSimulation::shutdown()
 }
 
 void MujocoSimulation::reset_world_state(bool fill_initial_state)
+{
+  reset_world_state(fill_initial_state, mujoco_ros2_control_msgs::msg::SimulationState{});
+}
+
+void MujocoSimulation::reset_world_state(bool fill_initial_state,
+                                         const mujoco_ros2_control_msgs::msg::SimulationState& state_overrides)
 {
   /// @note This method assumes sim_mutex_ is already held by the caller
 
@@ -778,16 +889,38 @@ void MujocoSimulation::reset_world_state(bool fill_initial_state)
   std::fill(mj_data_->qfrc_applied, mj_data_->qfrc_applied + mj_model_->nv, 0.0);
   std::fill(mj_data_->xfrc_applied, mj_data_->xfrc_applied + 6 * mj_model_->nbody, 0.0);
 
-  // Clear plugin contributions
-  std::fill(xfrc_plugin_desired_.begin(), xfrc_plugin_desired_.end(), 0.0);
-  std::fill(xfrc_viewer_capture_.begin(), xfrc_viewer_capture_.end(), 0.0);
-  std::fill(xfrc_last_written_.begin(), xfrc_last_written_.end(), 0.0);
+  // Restore equality-constraint activations to their MJCF defaults
+  std::copy(mj_model_->eq_active0, mj_model_->eq_active0 + mj_model_->neq, mj_data_->eq_active);
+
+  {
+    // Clear staged control inputs so stale commands from before the reset are not re-applied
+    // on the next step.
+    const std::lock_guard<std::mutex> staging_lock(control_staging_mutex_);
+    control_inputs_staged_ = false;
+    std::fill(ctrl_staged_.begin(), ctrl_staged_.end(), 0.0);
+    std::fill(qfrc_applied_staged_.begin(), qfrc_applied_staged_.end(), 0.0);
+  }
 
   // Restore simulation time to preserve ROS clock continuity
   mj_data_->time = saved_time;
 
+  // Apply single-DOF joint overrides on top of the restored state.
+  apply_joint_state_overrides(state_overrides.joint_states);
+
+  // Apply free-joint overrides. Their frame_ids resolve against post-reset body poses
+  // (including the single-DOF overrides above), so refresh kinematics before applying.
+  if (!state_overrides.free_joints.empty())
+  {
+    mj_kinematics(mj_model_, mj_data_);
+    apply_free_joint_states(state_overrides.free_joints);
+  }
+
   // Run forward dynamics to update derived quantities
   mj_forward(mj_model_, mj_data_);
+
+  // Make the reset state visible to snapshot readers before HW-side bookkeeping runs
+  refresh_data_snapshot();
+  publish_control_state();
 
   // Delegate HW-side bookkeeping (PID resets, command/state interface sync, etc.)
   if (reset_callback_)
@@ -806,6 +939,19 @@ void MujocoSimulation::reset_world_callback(
                          "Reset world service called. Resetting to initial keyframe...");
   const std::unique_lock<std::recursive_mutex> lock(*sim_mutex_);
 
+  // Validate every override before touching any state, so an invalid entry leaves the world
+  // un-reset. Validation only checks names and shapes against the model; free-joint frame_ids
+  // resolve against post-reset body poses when reset_world_state applies the overrides.
+  std::string error_message;
+  if (!validate_joint_state_overrides(request->state_overrides.joint_states, error_message) ||
+      !validate_free_joint_states(request->state_overrides.free_joints, error_message))
+  {
+    response->message = error_message + " Not resetting world.";
+    RCLCPP_ERROR(get_logger(), "%s", response->message.c_str());
+    response->success = false;
+    return;
+  }
+
   bool fill_initial_state = request->keyframe.empty();
   if (!fill_initial_state)
   {
@@ -818,10 +964,18 @@ void MujocoSimulation::reset_world_callback(
     }
   }
 
-  reset_world_state(fill_initial_state);
+  reset_world_state(fill_initial_state, request->state_overrides);
   response->success = true;
   const std::string keyframe_str = fill_initial_state ? "initial" : ("'" + request->keyframe + "'");
   response->message = "Successfully reset the MuJoCo world to the " + keyframe_str + " state.";
+  // Reported separately: the two fields are keyed differently (joint name vs. body name).
+  const size_t num_joint_overrides = request->state_overrides.joint_states.name.size();
+  const size_t num_free_joint_overrides = request->state_overrides.free_joints.size();
+  if (num_joint_overrides > 0 || num_free_joint_overrides > 0)
+  {
+    response->message += " Applied " + std::to_string(num_joint_overrides) + " joint and " +
+                         std::to_string(num_free_joint_overrides) + " free-joint override(s).";
+  }
 
   RCLCPP_INFO(get_logger(), "%s", response->message.c_str());
 }
@@ -924,6 +1078,240 @@ void MujocoSimulation::step_simulation_callback(
   }
 }
 
+int MujocoSimulation::frame_body_id(const std::string& frame_id) const
+{
+  if (frame_id.empty())
+  {
+    return -1;
+  }
+  return mj_name2id(mj_model_, mjOBJ_BODY, frame_id.c_str());
+}
+
+bool MujocoSimulation::validate_frame_id(const std::string& frame_id, const std::string& field_label,
+                                         std::string& error_message) const
+{
+  if (!frame_id.empty() && frame_body_id(frame_id) == -1)
+  {
+    error_message = "Unknown " + field_label + " frame_id body name: '" + frame_id + "'.";
+    return false;
+  }
+  return true;
+}
+
+int MujocoSimulation::find_free_joint_id(int body_id) const
+{
+  // A body's joints are contiguous from body_jntadr, and a free joint is the only joint its body
+  // can carry, so this inspects one entry rather than scanning all njnt joints.
+  const int first_joint = mj_model_->body_jntadr[body_id];
+  const int num_joints = mj_model_->body_jntnum[body_id];
+  for (int j = first_joint; j >= 0 && j < first_joint + num_joints; ++j)
+  {
+    if (mj_model_->jnt_type[j] == mjJNT_FREE)
+    {
+      return j;
+    }
+  }
+  return -1;
+}
+
+bool MujocoSimulation::validate_free_joint_states(
+    const std::vector<mujoco_ros2_control_msgs::msg::FreeJointState>& free_joints, std::string& error_message)
+{
+  for (size_t i = 0; i < free_joints.size(); ++i)
+  {
+    const mujoco_ros2_control_msgs::msg::FreeJointState& state = free_joints[i];
+    // Only built when an entry is rejected, which is why this is a lambda and not a string.
+    const auto fail = [&](const std::string& reason) {
+      error_message = "Entry " + std::to_string(i) + " ('" + state.name + "'): " + reason;
+      return false;
+    };
+
+    const int body_id = mj_name2id(mj_model_, mjOBJ_BODY, state.name.c_str());
+    if (body_id == -1)
+    {
+      return fail("Unknown body name.");
+    }
+
+    if (find_free_joint_id(body_id) == -1)
+    {
+      return fail("Body is not driven by a free joint.");
+    }
+
+    std::string frame_error;
+    if (!validate_frame_id(state.pose.header.frame_id, "pose", frame_error) ||
+        !validate_frame_id(state.twist.header.frame_id, "twist", frame_error))
+    {
+      return fail(frame_error);
+    }
+  }
+  return true;
+}
+
+void MujocoSimulation::apply_free_joint_states(
+    const std::vector<mujoco_ros2_control_msgs::msg::FreeJointState>& free_joints)
+{
+  for (const mujoco_ros2_control_msgs::msg::FreeJointState& state : free_joints)
+  {
+    const int body_id = mj_name2id(mj_model_, mjOBJ_BODY, state.name.c_str());
+    const int joint_id = find_free_joint_id(body_id);
+    // qpos layout is position then orientation in (w, x, y, z), MuJoCo's convention; qvel is
+    // linear then angular velocity.
+    mjtNum* qpos = mj_data_->qpos + mj_model_->jnt_qposadr[joint_id];
+    mjtNum* qvel = mj_data_->qvel + mj_model_->jnt_dofadr[joint_id];
+
+    const mjtNum rel_pos[3] = { state.pose.pose.position.x, state.pose.pose.position.y, state.pose.pose.position.z };
+    const mjtNum rel_quat[4] = { state.pose.pose.orientation.w, state.pose.pose.orientation.x,
+                                 state.pose.pose.orientation.y, state.pose.pose.orientation.z };
+    const mjtNum rel_linvel[3] = { state.twist.twist.linear.x, state.twist.twist.linear.y, state.twist.twist.linear.z };
+    const mjtNum rel_angvel[3] = { state.twist.twist.angular.x, state.twist.twist.angular.y,
+                                   state.twist.twist.angular.z };
+
+    // Frame poses come from xpos/xquat, which only change when kinematics runs, so earlier
+    // entries' qpos/qvel writes cannot affect later entries' frame resolution.
+    const int pose_frame_body_id = frame_body_id(state.pose.header.frame_id);
+    if (pose_frame_body_id == -1)
+    {
+      mju_copy3(qpos, rel_pos);
+      mju_copy4(qpos + 3, rel_quat);
+    }
+    else
+    {
+      mju_mulPose(qpos, qpos + 3, mj_data_->xpos + 3 * pose_frame_body_id, mj_data_->xquat + 4 * pose_frame_body_id,
+                  rel_pos, rel_quat);
+    }
+
+    const int twist_frame_body_id = frame_body_id(state.twist.header.frame_id);
+    if (twist_frame_body_id == -1)
+    {
+      mju_copy3(qvel, rel_linvel);
+      mju_copy3(qvel + 3, rel_angvel);
+    }
+    else
+    {
+      // The reference body's own velocity is not added, only its orientation.
+      const mjtNum* twist_frame_quat = mj_data_->xquat + 4 * twist_frame_body_id;
+      mju_rotVecQuat(qvel, rel_linvel, twist_frame_quat);
+      mju_rotVecQuat(qvel + 3, rel_angvel, twist_frame_quat);
+    }
+  }
+}
+
+bool MujocoSimulation::validate_joint_state_overrides(const sensor_msgs::msg::JointState& joint_state,
+                                                      std::string& error_message)
+{
+  const size_t num_joints = joint_state.name.size();
+  if (!joint_state.effort.empty())
+  {
+    error_message = "Joint state effort is not supported; leave 'effort' empty.";
+    return false;
+  }
+  // Both value arrays are optional, but a non-empty one must line up with 'name'.
+  const auto check_length = [&](const char* field, size_t size) {
+    if (size == 0 || size == num_joints)
+    {
+      return true;
+    }
+    error_message = std::string("Joint state '") + field + "' has " + std::to_string(size) +
+                    " entries but 'name' has " + std::to_string(num_joints) + "; it must be empty or the same length.";
+    return false;
+  };
+  if (!check_length("position", joint_state.position.size()) || !check_length("velocity", joint_state.velocity.size()))
+  {
+    return false;
+  }
+
+  for (size_t i = 0; i < num_joints; ++i)
+  {
+    const std::string& name = joint_state.name[i];
+    // Only built when an entry is rejected, which is why this is a lambda and not a string.
+    const auto fail = [&](const std::string& reason) {
+      error_message = "Entry " + std::to_string(i) + " ('" + name + "'): " + reason;
+      return false;
+    };
+
+    const int joint_id = mj_name2id(mj_model_, mjOBJ_JOINT, name.c_str());
+    if (joint_id == -1)
+    {
+      return fail("Unknown joint name.");
+    }
+    const int joint_type = mj_model_->jnt_type[joint_id];
+    if (joint_type != mjJNT_HINGE && joint_type != mjJNT_SLIDE)
+    {
+      // Ball and other multi-DOF joints have no home in either field: one scalar per name cannot
+      // express them, and they are not free-joint bodies either.
+      fail("Not a single-DOF (hinge or slide) joint.");
+      if (joint_type == mjJNT_FREE)
+      {
+        error_message += " Free joints are set through 'state_overrides.free_joints' by body name.";
+      }
+      return false;
+    }
+  }
+  return true;
+}
+
+void MujocoSimulation::apply_joint_state_overrides(const sensor_msgs::msg::JointState& joint_state)
+{
+  for (size_t i = 0; i < joint_state.name.size(); ++i)
+  {
+    const int joint_id = mj_name2id(mj_model_, mjOBJ_JOINT, joint_state.name[i].c_str());
+    if (!joint_state.position.empty())
+    {
+      mj_data_->qpos[mj_model_->jnt_qposadr[joint_id]] = joint_state.position[i];
+    }
+    if (!joint_state.velocity.empty())
+    {
+      mj_data_->qvel[mj_model_->jnt_dofadr[joint_id]] = joint_state.velocity[i];
+    }
+  }
+}
+
+bool MujocoSimulation::set_free_joint_states(
+    const std::vector<mujoco_ros2_control_msgs::msg::FreeJointState>& free_joints, std::string& error_message)
+{
+  const std::unique_lock<std::recursive_mutex> lock(*sim_mutex_);
+
+  // Nothing to write, and nothing worth republishing a snapshot for.
+  if (free_joints.empty())
+  {
+    return true;
+  }
+
+  // Validate everything before writing anything, so a single invalid entry leaves mj_data_
+  // untouched.
+  if (!validate_free_joint_states(free_joints, error_message))
+  {
+    RCLCPP_WARN(get_logger(), "%s", error_message.c_str());
+    return false;
+  }
+
+  apply_free_joint_states(free_joints);
+
+  refresh_data_snapshot();
+  publish_control_state();
+  mj_forward(mj_model_, mj_data_);
+  return true;
+}
+
+void MujocoSimulation::set_free_joint_state_callback(
+    const std::shared_ptr<mujoco_ros2_control_msgs::srv::SetFreeJointState::Request> request,
+    std::shared_ptr<mujoco_ros2_control_msgs::srv::SetFreeJointState::Response> response)
+{
+  std::string error_message;
+  response->success = set_free_joint_states(request->free_joints, error_message);
+  if (response->success)
+  {
+    response->message = "Successfully set free joint state for " + std::to_string(request->free_joints.size()) +
+                        " bod" + (request->free_joints.size() == 1 ? "y" : "ies") + ".";
+    RCLCPP_INFO(get_logger(), "%s", response->message.c_str());
+  }
+  else
+  {
+    response->message = error_message;
+    RCLCPP_WARN(get_logger(), "%s", response->message.c_str());
+  }
+}
+
 void MujocoSimulation::copy_physics_model(mjModel*& destination)
 {
   const std::unique_lock<std::recursive_mutex> lock(*sim_mutex_);
@@ -934,6 +1322,8 @@ void MujocoSimulation::overwrite_physics_data(mjData* source)
 {
   const std::unique_lock<std::recursive_mutex> lock(*sim_mutex_);
   mj_copyData(mj_data_, mj_model_, source);
+  refresh_data_snapshot();
+  publish_control_state();
 }
 
 void MujocoSimulation::copy_physics_data(mjData*& destination)
@@ -944,23 +1334,87 @@ void MujocoSimulation::copy_physics_data(mjData*& destination)
   }
 
   const std::unique_lock<std::recursive_mutex> lock(*sim_mutex_);
+  // Authoritative copies also refresh the snapshots, so that snapshot readers immediately see
+  // any direct mj_data_ manipulation the caller performed before this call (e.g. during setup).
+  refresh_data_snapshot();
+  publish_control_state();
   mj_copyData(destination, mj_model_, mj_data_);
+}
+
+mjData* MujocoSimulation::acquire_data_snapshot()
+{
+  {
+    const std::lock_guard<std::mutex> lock(data_exchange_mutex_);
+    if (snapshot_ready_)
+    {
+      // Take ownership of the completed snapshot and recycle the previous one back to the
+      // producer. O(1): the consumer never copies and never waits on a fill.
+      std::swap(snapshot_write_, snapshot_read_);
+      snapshot_ready_ = false;
+    }
+  }
+
+  // Ask the physics loop for a fresh snapshot now that this one has been consumed.
+  // Data is therefore at most one consumer period + one physics batch old, while the
+  // expensive refresh runs at the aggregate consumer rate instead of every batch.
+  snapshot_refresh_requested_.store(true, std::memory_order_release);
+  return snapshot_read_;
 }
 
 void MujocoSimulation::apply_control_data(mjData* control_data)
 {
-  const std::unique_lock<std::recursive_mutex> lock(*sim_mutex_);
-  mju_copy(mj_data_->ctrl, control_data->ctrl, static_cast<int>(mj_model_->nu));
-  mju_copy(mj_data_->qfrc_applied, control_data->qfrc_applied, static_cast<int>(mj_model_->nv));
-  mju_copy(xfrc_plugin_desired_.data(), control_data->xfrc_applied, 6 * static_cast<int>(mj_model_->nbody));
+  const std::lock_guard<std::mutex> lock(control_staging_mutex_);
+  mju_copy(ctrl_staged_.data(), control_data->ctrl, static_cast<int>(mj_model_->nu));
+  mju_copy(qfrc_applied_staged_.data(), control_data->qfrc_applied, static_cast<int>(mj_model_->nv));
+  control_inputs_staged_ = true;
 }
 
-void MujocoSimulation::handle_xfrc_applied()
+void MujocoSimulation::refresh_data_snapshot()
 {
-  const int nbody6 = 6 * static_cast<int>(mj_model_->nbody);
-  mju_copy(mj_data_->xfrc_applied, xfrc_viewer_capture_.data(), nbody6);
-  mju_addTo(mj_data_->xfrc_applied, xfrc_plugin_desired_.data(), nbody6);
-  mju_copy(xfrc_last_written_.data(), mj_data_->xfrc_applied, nbody6);
+  {
+    // Reclaim the producer-side buffer. Once snapshot_ready_ is lowered the consumer can no
+    // longer swap it away mid-fill, so the copy below can safely run outside the lock.
+    const std::lock_guard<std::mutex> lock(data_exchange_mutex_);
+    snapshot_ready_ = false;
+  }
+
+  // Scene-sized copy, paid by the producer, outside any shared lock.
+  // Writers are serialized by the sim mutex and the consumer never touches snapshot_write_.
+  mj_copyData(snapshot_write_, mj_model_, mj_data_);
+
+  const std::lock_guard<std::mutex> lock(data_exchange_mutex_);
+  snapshot_ready_ = true;
+}
+
+void MujocoSimulation::publish_control_state()
+{
+  const std::lock_guard<std::mutex> lock(control_state_mutex_);
+  control_state_.time = mj_data_->time;
+  control_state_.qpos.assign(mj_data_->qpos, mj_data_->qpos + mj_model_->nq);
+  control_state_.qvel.assign(mj_data_->qvel, mj_data_->qvel + mj_model_->nv);
+  control_state_.act.assign(mj_data_->act, mj_data_->act + mj_model_->na);
+  control_state_.qfrc_actuator.assign(mj_data_->qfrc_actuator, mj_data_->qfrc_actuator + mj_model_->nv);
+  control_state_.sensordata.assign(mj_data_->sensordata, mj_data_->sensordata + mj_model_->nsensordata);
+  control_state_.ctrl.assign(mj_data_->ctrl, mj_data_->ctrl + mj_model_->nu);
+}
+
+void MujocoSimulation::copy_control_state(ControlState& destination)
+{
+  const std::lock_guard<std::mutex> lock(control_state_mutex_);
+  destination = control_state_;
+}
+
+void MujocoSimulation::apply_staged_control_inputs()
+{
+  const std::lock_guard<std::mutex> lock(control_staging_mutex_);
+
+  // Only apply ctrl / qfrc_applied once the hw interface has staged control inputs,
+  // so that initial or reset values in mj_data_ are not overwritten with zeros.
+  if (control_inputs_staged_)
+  {
+    mju_copy(mj_data_->ctrl, ctrl_staged_.data(), static_cast<int>(mj_model_->nu));
+    mju_copy(mj_data_->qfrc_applied, qfrc_applied_staged_.data(), static_cast<int>(mj_model_->nv));
+  }
 }
 
 // simulate in background thread (while rendering in main thread)
@@ -976,7 +1430,7 @@ void MujocoSimulation::physics_loop()
   // run until asked to exit
   while (!sim_->exitrequest.load())
   {
-    // sleep for 1 ms or yield, to let main thread run
+    // sleep for 20% of the timestep (max 1 ms) or yield, to let main thread run
     //  yield results in busy wait - which has better timing but kills battery life
     if (sim_->run && sim_->busywait)
     {
@@ -984,7 +1438,7 @@ void MujocoSimulation::physics_loop()
     }
     else
     {
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      std::this_thread::sleep_for(physics_loop_sleep_duration(mj_model_->opt.timestep));
     }
 
     {
@@ -1014,25 +1468,6 @@ void MujocoSimulation::physics_loop()
       // run only if model is present
       if (mj_model_)
       {
-        // Determine the viewer (drag) forces for this outer iteration.
-        //
-        // mjv_updateScene in simulate.cc reads mj_data_->xfrc_applied BEFORE zeroing it, so
-        // plugin forces written here are visible as arrows in the native viewer. To avoid
-        // accumulation across outer iterations we must preserve the viewer-drag portion.
-        // We do this in xfrc_viewer_capture_.
-        //
-        // After each outer iteration we restore mj_data_->xfrc_applied = viewer + plugin and
-        // record it in xfrc_last_written_. We can then combine the desired forces from the plugins
-        // as well as the viewers prior to stepping, without either of them stacking in
-        // undesirable ways.
-        const int nbody6 = 6 * static_cast<int>(mj_model_->nbody);
-        if (std::memcmp(mj_data_->xfrc_applied, xfrc_last_written_.data(), nbody6 * sizeof(mjtNum)) != 0)
-        {
-          // Render thread ran: xfrc_applied was zeroed then drag was applied.
-          mju_copy(xfrc_viewer_capture_.data(), mj_data_->xfrc_applied, nbody6);
-        }
-        // else: render thread did not run; keep the existing xfrc_viewer_capture_.
-
         // running (ie, not paused)
         if (sim_->run)
         {
@@ -1045,6 +1480,11 @@ void MujocoSimulation::physics_loop()
             pending_steps_.store(0);
             steps_interrupted_.store(true);
             steps_cv_.notify_all();
+          }
+
+          if (snapshot_refresh_requested_.exchange(false, std::memory_order_acq_rel))
+          {
+            refresh_data_snapshot();
           }
 
           bool stepped = false;
@@ -1075,11 +1515,14 @@ void MujocoSimulation::physics_loop()
             syncSim = mj_data_->time;
             sim_->speed_changed = false;
 
-            handle_xfrc_applied();
+            apply_staged_control_inputs();
+            pre_step_callback_(mj_data_);
             // run single step, let next iteration deal with timing
             mj_step(mj_model_, mj_data_);
 
-            // Publish clock after each successful step
+            // Publish the per-step control state before the clock tick,
+            // so consumers woken by this tick read state synchronous with that sim time.
+            publish_control_state();
             publish_clock();
 
             const char* message = Diverged(mj_model_->opt.disableflags, mj_data_);
@@ -1124,11 +1567,13 @@ void MujocoSimulation::physics_loop()
 #else
               sim_->InjectNoise(-1);
 #endif
-              handle_xfrc_applied();
+              apply_staged_control_inputs();
+              pre_step_callback_(mj_data_);
               // call mj_step
               mj_step(mj_model_, mj_data_);
 
-              // Publish clock after each successful step
+              // Publish the per-step control state before the clock tick (see above)
+              publish_control_state();
               publish_clock();
 
               const char* message = Diverged(mj_model_->opt.disableflags, mj_data_);
@@ -1157,7 +1602,7 @@ void MujocoSimulation::physics_loop()
           // save current state to history buffer
           if (stepped)
           {
-            handle_xfrc_applied();
+            apply_staged_control_inputs();
             sim_->AddToHistory();
             update_sim_display();
           }
@@ -1173,15 +1618,17 @@ void MujocoSimulation::physics_loop()
             pending_steps_.fetch_add(1);
           }
 
-          // Record so the next iteration can detect render thread changes, only necessary once
-          // when paused
-          handle_xfrc_applied();
+          // Merge staged actuator commands even while paused, so a queued step (and the
+          // viewer's display of ctrl) reflects the latest commands.
+          apply_staged_control_inputs();
 
           // Execute one pending step per physics loop iteration so the clock publisher
           // (try_publish) has time to flush between steps, matching play mode behavior.
           if (pending_steps_.load() > 0)
           {
+            pre_step_callback_(mj_data_);
             mj_step(mj_model_, mj_data_);
+            publish_control_state();
             publish_clock();
 
             const char* message = Diverged(mj_model_->opt.disableflags, mj_data_);
@@ -1212,6 +1659,13 @@ void MujocoSimulation::physics_loop()
             sim_->speed_changed = true;
             update_sim_display();
           }
+
+          // Keep the snapshots in sync while paused so reads reflect steps and UI edits
+          if (snapshot_refresh_requested_.exchange(false, std::memory_order_acq_rel))
+          {
+            refresh_data_snapshot();
+          }
+          publish_control_state();
         }
 
         // Update previous simulation time for next iteration
@@ -1248,22 +1702,35 @@ void MujocoSimulation::update_sim_display()
     return;
   }
 
-  // Only write user_texts_new_ when the render thread has consumed the previous
-  // update (newtextrequest == 0). Use compare_exchange to atomically claim the
-  // slot: if it fails, the render thread hasn't swapped yet, so skip this
-  // update — the display will be refreshed on the next physics step instead.
-  // This avoids a data race: the render thread swaps user_texts_new_ (without
-  // holding any mutex) while we clear/populate it.
-  int expected = 0;
-  if (!sim_->newtextrequest.compare_exchange_strong(expected, 1))
+  // Lock-free handoff to the render thread, which swaps user_texts_new_ without
+  // holding sim_->mtx (Simulate::Render runs outside the lock). newtextrequest is
+  // the single-producer/single-consumer flag: 0 = physics may write, 1 = render
+  // may consume. Skip if the last update hasn't been consumed yet.
+  if (sim_->newtextrequest.load(std::memory_order_acquire) != 0)
   {
-    return;  // render thread hasn't consumed the last update yet, skip
+    return;
   }
 
-  const std::string status = sim_->run ? "Running" : "Paused";
+  // Desired speed: from parameter override when set, otherwise from the UI slider.
+  const double desired_pct = sim_speed_factor_ < 0 ? static_cast<double>(sim_->percentRealTime[sim_->real_time_index]) :
+                                                     sim_speed_factor_ * 100.0;
+
+  // Actual speed: measured_slowdown = CPU_time / sim_time, so speed = 100 / slowdown.
+  // Falls back to 0 while paused (slowdown stays at its last measured value but we
+  // suppress the display when there is no forward progress).
+  const double actual_pct = sim_->run ? (100.0 / sim_->measured_slowdown) : 0.0;
+
+  // mj_data_ is owned by this (the physics) thread, so reading time/ncon needs no extra locking.
+  // Contacts surface why the sim slows down: a spike here usually explains a drop in actual speed.
+  const auto [title, content] =
+      compose_sim_display_text(sim_->run, step_count_.load(), mj_data_->time, desired_pct, actual_pct, mj_data_->ncon);
+
   sim_->user_texts_new_.clear();
-  sim_->user_texts_new_.emplace_back(mjFONT_NORMAL, mjGRID_TOPRIGHT, "Status\nSteps",
-                                     status + "\n" + std::to_string(step_count_.load()));
+  sim_->user_texts_new_.emplace_back(mjFONT_NORMAL, mjGRID_TOPRIGHT, title, content);
+
+  // Publish only after the vector is fully written; the release store pairs with
+  // the render thread's load.
+  sim_->newtextrequest.store(1, std::memory_order_release);
 }
 
 }  // namespace mujoco_ros2_control

@@ -26,12 +26,18 @@
 
 #include <mujoco/mujoco.h>
 #include <rclcpp/rclcpp.hpp>
+#include <std_srvs/srv/trigger.hpp>
 
-#include <mujoco_ros2_control_plugins/camera_plugin.hpp>
+#include "camera_plugin.hpp"
+
+using namespace std::chrono_literals;
 
 class CameraPluginTest : public ::testing::Test
 {
 protected:
+  static constexpr auto WAIT_TIMEOUT = 2s;
+  static constexpr auto POLL_INTERVAL = 20ms;
+
   static void SetUpTestSuite()
   {
     if (!rclcpp::ok())
@@ -108,6 +114,49 @@ protected:
     ASSERT_NE(data_, nullptr);
   }
 
+  // Blocks until the rendering thread has finished initializing its GL context.
+  void wait_for_rendering(mujoco_ros2_control_plugins::CameraPlugin& plugin)
+  {
+    const auto deadline = std::chrono::steady_clock::now() + WAIT_TIMEOUT;
+    while (!plugin.is_rendering_available() && std::chrono::steady_clock::now() < deadline)
+    {
+      std::this_thread::sleep_for(POLL_INTERVAL);
+    }
+    // TODO: We could optionally skip the test in CI if this happens consistently. Though
+    // for now we hope that failures due to uninitialized contexts will be extremely rare.
+    // https://github.com/ros-controls/mujoco_ros2_control/issues/216
+    ASSERT_TRUE(plugin.is_rendering_available()) << "OpenGL rendering unavailable in this environment!!! Failing...";
+  }
+
+  // Block until every subscription in the list has matched at least one publisher.
+  template <typename... Subs>
+  void wait_for_subscriber_match(const Subs&... subs)
+  {
+    auto all_matched = [&]() { return ((subs->get_publisher_count() > 0) && ...); };
+    const auto deadline = std::chrono::steady_clock::now() + WAIT_TIMEOUT;
+    while (!all_matched() && std::chrono::steady_clock::now() < deadline)
+    {
+      std::this_thread::sleep_for(POLL_INTERVAL);
+    }
+    ASSERT_TRUE(all_matched()) << "Subscribers never matched publishers within timeout";
+  }
+
+  // Calls a Trigger service and returns whether the call succeeded.
+  bool call_trigger(const std::string& service_name)
+  {
+    auto client = node_->create_client<std_srvs::srv::Trigger>(service_name);
+    if (!client->wait_for_service(WAIT_TIMEOUT))
+    {
+      return false;
+    }
+    auto future = client->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>());
+    if (future.wait_for(WAIT_TIMEOUT) != std::future_status::ready)
+    {
+      return false;
+    }
+    return future.get()->success;
+  }
+
   std::unique_ptr<rclcpp::executors::MultiThreadedExecutor> executor_;
   std::thread spin_thread_;
   rclcpp::Node::SharedPtr node_;
@@ -161,7 +210,9 @@ TEST_F(CameraPluginTest, InitAndPublish)
   mujoco_ros2_control_plugins::CameraPlugin plugin;
   // GLFW is not initialized, and No OpenGL framebuffer will be available so we make the init fall back on to EGL.
   EXPECT_TRUE(plugin.init(plugin_node_, model_, data_, []() { return 0; }));
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  // Wait for the rendering thread to come up
+  wait_for_rendering(plugin);
 
   // Verify publishers were created
   EXPECT_EQ(plugin_node_->count_publishers("/camera_plugin/test_cam/color"), 1u);
@@ -172,27 +223,140 @@ TEST_F(CameraPluginTest, InitAndPublish)
   std::atomic<bool> received_image{ false };
   std::atomic<bool> received_depth{ false };
   std::atomic<bool> received_info{ false };
+  std::atomic<bool> received_expected_frame_id{ false };
   auto image_sub = node_->create_subscription<sensor_msgs::msg::Image>(
-      "/camera_plugin/test_cam/color", 1, [&](sensor_msgs::msg::Image::SharedPtr msg) { received_image = true; });
+      "/camera_plugin/test_cam/color", 1, [&](sensor_msgs::msg::Image::SharedPtr) { received_image = true; });
   auto depth_sub = node_->create_subscription<sensor_msgs::msg::Image>(
-      "/camera_plugin/test_cam/depth", 1, [&](sensor_msgs::msg::Image::SharedPtr msg) { received_depth = true; });
+      "/camera_plugin/test_cam/depth", 1, [&](sensor_msgs::msg::Image::SharedPtr) { received_depth = true; });
   auto info_sub = node_->create_subscription<sensor_msgs::msg::CameraInfo>(
-      "/camera_plugin/test_cam/camera_info", 1,
-      [&](sensor_msgs::msg::CameraInfo::SharedPtr msg) { received_info = true; });
+      "/camera_plugin/test_cam/camera_info", 1, [&](sensor_msgs::msg::CameraInfo::SharedPtr msg) {
+        received_info = true;
+        received_expected_frame_id = (msg->header.frame_id == "test_cam_frame");
+      });
+
+  // Ensure publishers are connected to subscribers
+  wait_for_subscriber_match(image_sub, depth_sub, info_sub);
 
   // Force a publish and verify we get results
-  plugin.trigger_update();
-  for (auto i = 0; i < 20; ++i)
+  const auto deadline = std::chrono::steady_clock::now() + WAIT_TIMEOUT;
+  while (!(received_image && received_depth && received_info && received_expected_frame_id) &&
+         std::chrono::steady_clock::now() < deadline)
   {
-    if (received_image && received_depth && received_info)
-      break;
     plugin.trigger_update();
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::this_thread::sleep_for(POLL_INTERVAL);
   }
 
   ASSERT_TRUE(received_image);
   ASSERT_TRUE(received_depth);
   ASSERT_TRUE(received_info);
+  ASSERT_TRUE(received_expected_frame_id);
+
+  plugin.cleanup();
+}
+
+// Only polled cameras should expose a trigger service; streaming cameras should not.
+TEST_F(CameraPluginTest, OnlyPolledCamerasCreateTriggerService)
+{
+  const std::string param_prefix = "mujoco_plugins." + plugin_node_->get_sub_namespace() + ".";
+  plugin_node_->declare_parameter(param_prefix + "stream_cam.policy", std::string("streaming"));
+  plugin_node_->declare_parameter(param_prefix + "poll_cam.policy", std::string("polled"));
+  load_model(R"(<?xml version="1.0"?>
+<mujoco model="two_cameras">
+  <worldbody>
+    <body name="box" pos="0 0 0.1">
+      <freejoint/>
+      <inertial pos="0 0 0" mass="1.0" diaginertia="0.01 0.01 0.01"/>
+      <geom type="box" size="0.05 0.05 0.05"/>
+    </body>
+    <camera name="stream_cam" pos="0 -1 1" xyaxes="1 0 0 0 0.707 0.707"
+            fovy="60" resolution="64 48"/>
+    <camera name="poll_cam" pos="0 1 1" xyaxes="-1 0 0 0 0.707 -0.707"
+            fovy="60" resolution="64 48"/>
+  </worldbody>
+</mujoco>
+)");
+  ASSERT_EQ(model_->ncam, 2);
+
+  mujoco_ros2_control_plugins::CameraPlugin plugin;
+  EXPECT_TRUE(plugin.init(plugin_node_, model_, data_, []() { return 0; }));
+
+  // The polled camera's trigger service must come up.
+  auto poll_client = node_->create_client<std_srvs::srv::Trigger>("/camera_plugin/poll_cam/trigger");
+  EXPECT_TRUE(poll_client->wait_for_service(WAIT_TIMEOUT));
+
+  // The streaming camera must not have a trigger service registered.
+  const auto services = node_->get_service_names_and_types();
+  EXPECT_EQ(services.count("/camera_plugin/stream_cam/trigger"), 0u);
+
+  // Both cameras still publish their image/info topics.
+  EXPECT_EQ(plugin_node_->count_publishers("/camera_plugin/stream_cam/color"), 1u);
+  EXPECT_EQ(plugin_node_->count_publishers("/camera_plugin/poll_cam/color"), 1u);
+
+  plugin.cleanup();
+}
+
+// A polled camera must publish only in response to a trigger, never on the streaming clock,
+// and exactly once per trigger.
+TEST_F(CameraPluginTest, PolledCameraPublishesOncePerTrigger)
+{
+  load_model(R"(<?xml version="1.0"?>
+<mujoco model="polled_only">
+  <worldbody>
+    <body name="box" pos="0 0 0.1">
+      <freejoint/>
+      <inertial pos="0 0 0" mass="1.0" diaginertia="0.01 0.01 0.01"/>
+      <geom type="box" size="0.05 0.05 0.05"/>
+    </body>
+    <camera name="poll_cam" pos="0 -1 1" xyaxes="1 0 0 0 0.707 0.707"
+            fovy="60" resolution="64 48"/>
+  </worldbody>
+</mujoco>
+)");
+  ASSERT_EQ(model_->ncam, 1);
+
+  const std::string param_prefix = "mujoco_plugins." + plugin_node_->get_sub_namespace() + ".";
+  plugin_node_->declare_parameter(param_prefix + "poll_cam.policy", std::string("polled"));
+
+  mujoco_ros2_control_plugins::CameraPlugin plugin;
+  EXPECT_TRUE(plugin.init(plugin_node_, model_, data_, []() { return 0; }));
+
+  std::atomic<int> image_count{ 0 };
+  auto image_sub = node_->create_subscription<sensor_msgs::msg::Image>(
+      "/camera_plugin/poll_cam/color", 10, [&](sensor_msgs::msg::Image::SharedPtr) { ++image_count; });
+
+  // Wait for the rendering thread to come up
+  wait_for_rendering(plugin);
+
+  // Ensure publishers are connected to subscribers
+  wait_for_subscriber_match(image_sub);
+
+  // Without a trigger, running render cycles must not publish anything for a polled camera.
+  for (auto i = 0; i < 5; ++i)
+  {
+    plugin.trigger_update();
+    std::this_thread::sleep_for(POLL_INTERVAL);
+  }
+  EXPECT_EQ(image_count.load(), 0);
+
+  // Trigger once; the next render cycle should publish exactly one image.
+  ASSERT_TRUE(call_trigger("/camera_plugin/poll_cam/trigger"));
+  plugin.trigger_update();
+  {
+    const auto deadline = std::chrono::steady_clock::now() + WAIT_TIMEOUT;
+    while (image_count.load() < 1 && std::chrono::steady_clock::now() < deadline)
+    {
+      std::this_thread::sleep_for(POLL_INTERVAL);
+    }
+  }
+  EXPECT_EQ(image_count.load(), 1);
+
+  // The trigger is one-shot: subsequent render cycles without a new trigger publish nothing more.
+  for (auto i = 0; i < 5; ++i)
+  {
+    plugin.trigger_update();
+    std::this_thread::sleep_for(POLL_INTERVAL);
+  }
+  EXPECT_EQ(image_count.load(), 1);
 
   plugin.cleanup();
 }
