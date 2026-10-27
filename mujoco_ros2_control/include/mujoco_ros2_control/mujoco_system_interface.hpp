@@ -428,8 +428,6 @@ private:
 
   bool override_mujoco_actuator_positions_{ false };
   bool override_urdf_joint_positions_{ false };
-
-  std::string initial_keyframe_ = "";
 };
 
 }  // namespace mujoco_ros2_control

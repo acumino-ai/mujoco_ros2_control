@@ -18,7 +18,8 @@ Regression test: two controller_managers in one process drive one MuJoCo scene, 
 from /device_a and device_b_joint from /device_b. Each component must stage only its own
 actuator's command, also after reset_world, which re-enables control on every actuator that a
 component registered. See stage_control_data() in mujoco_system_interface.cpp. The scene's plugins
-must keep running while either component is inactive. See plugin_driver in SharedSimulation.
+must keep running while either component is inactive. See plugin_driver in SharedSimulation. Both
+joints must start at the keyframe.
 """
 
 import os
@@ -43,6 +44,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray, String
 
 JOINTS = {"device_a": "device_a_joint", "device_b": "device_b_joint"}
+KEYFRAME = {"device_a_joint": 0.1, "device_b_joint": -0.2}
 TOLERANCE = 0.005
 # Holding still against gravity takes a steady ~20 N from the joint's own PID. A component that
 # restages the other's actuator drops that force toward zero on the steps where it wins.
@@ -128,6 +130,16 @@ class TestSharedSimulation(unittest.TestCase):
         future = client.call_async(ResetWorld.Request())
         rclpy.spin_until_future_complete(self.node, future, timeout_sec=10.0)
         self.assertTrue(future.done() and future.result().success, "reset_world failed")
+
+    def test_both_joints_start_at_the_keyframe(self):
+        # Runs first (alphabetical order), before any test commands a joint.
+        self.assertTrue(
+            self.spin_until(lambda: all(joint in self.positions for joint in KEYFRAME)), "No joint states"
+        )
+        for joint, start in KEYFRAME.items():
+            self.assertAlmostEqual(
+                self.positions[joint], start, delta=TOLERANCE, msg=f"{joint} at {self.positions[joint]}"
+            )
 
     def test_one_simulation_for_both_managers(self):
         with WaitForTopics([("/clock", Clock)], timeout=10.0):

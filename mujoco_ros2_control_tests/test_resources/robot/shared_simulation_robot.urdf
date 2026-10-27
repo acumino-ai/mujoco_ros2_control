@@ -36,6 +36,8 @@
       <param name="pids_config_file">
         $(find mujoco_ros2_control_tests)/config/shared_simulation_pids.yaml
       </param>
+      <!-- Every device passes the same keyframe: only the first one applies it, the rest seed from it. -->
+      <param name="initial_keyframe">start</param>
       <param name="sim_speed_factor">1.0</param>
       <param name="headless">$(arg headless)</param>
     </hardware>

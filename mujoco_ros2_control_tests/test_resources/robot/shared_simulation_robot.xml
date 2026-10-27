@@ -23,4 +23,9 @@
     <motor name="device_a_joint" joint="device_a_joint" ctrlrange="-50 50"/>
     <motor name="device_b_joint" joint="device_b_joint" ctrlrange="-50 50"/>
   </actuator>
+
+  <keyframe>
+    <!-- Away from the URDF initial_value of 0.0, so a component that seeds from its URDF moves its joint. -->
+    <key name="start" qpos="0.1 -0.2"/>
+  </keyframe>
 </mujoco>

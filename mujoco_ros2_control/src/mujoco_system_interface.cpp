@@ -105,6 +105,13 @@ struct SharedSimulation
   // PID gains live on the shared node, which only the owner's file configures.
   std::optional<std::string> pids_config_file;
 
+  // The owner's initial_keyframe and override_start_position_file. Another component may repeat a
+  // value but not change it, since each one resets the whole scene.
+  std::map<std::string, std::string> start_settings;
+  // True when the owner wrote a start pose into qpos. Every component then seeds its joints from
+  // qpos, not from its URDF initial values, which would move the joints away from that pose.
+  bool seeded_from_scene{ false };
+
   // Latest command per actuator (ctrl) and dof (qfrc_applied), and the component that writes it.
   // nullptr entries belong to no component and keep the sim's own value.
   std::mutex control_mutex;
@@ -459,6 +466,35 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
       {
         return hardware_interface::CallbackReturn::ERROR;
       }
+
+      // Applied before the registry entry exists: a component that attaches must read the start pose from qpos.
+      simulation_ = shared->simulation.get();
+      for (const char* key : { "initial_keyframe", "override_start_position_file" })
+      {
+        shared->start_settings[key] = get_hardware_parameter_or(get_hardware_info(), key, "");
+      }
+      const std::string& start_position_file = shared->start_settings["override_start_position_file"];
+      const std::string& initial_keyframe = shared->start_settings["initial_keyframe"];
+      if (!start_position_file.empty())
+      {
+        shared->seeded_from_scene = set_override_start_positions(start_position_file);
+        RCLCPP_ERROR_EXPRESSION(get_logger(), !shared->seeded_from_scene,
+                                "Failed to load override start positions from %s. Falling back to urdf initial "
+                                "positions.",
+                                start_position_file.c_str());
+        RCLCPP_INFO_EXPRESSION(get_logger(), shared->seeded_from_scene, "Loaded initial positions from file %s.",
+                               start_position_file.c_str());
+      }
+      if (!shared->seeded_from_scene && !initial_keyframe.empty())
+      {
+        RCLCPP_INFO(get_logger(), "Applying initial keyframe: '%s'", initial_keyframe.c_str());
+        if (!simulation_->apply_keyframe(initial_keyframe))
+        {
+          RCLCPP_FATAL(get_logger(), "Failed to apply initial keyframe: '%s'", initial_keyframe.c_str());
+          return hardware_interface::CallbackReturn::ERROR;
+        }
+        shared->seeded_from_scene = true;
+      }
       // Held until load_mujoco_plugins() returns, so no other write() reads plugin_instances mid-load.
       shared->plugin_driver = this;
       shared_ = shared;
@@ -483,12 +519,15 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
                    "shared node, so every component of one mujoco_model must pass the same file.");
       return hardware_interface::CallbackReturn::ERROR;
     }
-    for (const char* key : { "initial_keyframe", "override_start_position_file" })
+    for (const auto& [key, owner_value] : shared_->start_settings)
     {
-      if (!get_hardware_parameter_or(get_hardware_info(), key, "").empty())
+      const std::string value = get_hardware_parameter_or(get_hardware_info(), key, "");
+      if (!value.empty() && value != owner_value)
       {
         RCLCPP_FATAL(get_logger(),
-                     "'%s' resets the whole scene, so only the first component of a mujoco_model may set it.", key);
+                     "'%s' differs from the one the simulation was started with. It resets the whole scene, so "
+                     "every component of one mujoco_model must pass the same value or none.",
+                     key.c_str());
         return hardware_interface::CallbackReturn::ERROR;
       }
     }
@@ -1550,37 +1589,10 @@ bool MujocoSystemInterface::register_mujoco_actuators()
   mujoco_actuator_data_.clear();
   mujoco_actuator_data_.resize(simulation_->model()->nu);
 
-  // Pull the name of the file to load for starting config, if present. We only override start position if that
-  // parameter exists and it is not an empty string
-  override_mujoco_actuator_positions_ = false;
-  auto it = get_hardware_info().hardware_parameters.find("override_start_position_file");
-  if (it != get_hardware_info().hardware_parameters.end())
-  {
-    override_mujoco_actuator_positions_ = !it->second.empty();
-  }
-
-  // If we have that file present, load the initial positions from that file to the appropriate simulation_->data() structures
-  if (override_mujoco_actuator_positions_)
-  {
-    std::string override_start_position_file = it->second;
-    bool success = set_override_start_positions(override_start_position_file);
-    if (!success)
-    {
-      RCLCPP_ERROR(get_logger(),
-                   "Failed to load override start positions from %s. Falling back to urdf initial positions.",
-                   override_start_position_file.c_str());
-      override_mujoco_actuator_positions_ = false;
-    }
-    else
-    {
-      RCLCPP_INFO(get_logger(), "Loaded initial positions from file %s.", override_start_position_file.c_str());
-    }
-  }
-  else
-  {
-    RCLCPP_INFO(get_logger(),
-                "override_start_position_file not passed. Loading initial positions from ros2_control xacro.");
-  }
+  // The owner applied any start pose in on_init(), so qpos already holds it.
+  override_mujoco_actuator_positions_ = shared_->seeded_from_scene;
+  RCLCPP_INFO_EXPRESSION(get_logger(), !override_mujoco_actuator_positions_,
+                         "No start pose in the scene. Loading initial positions from ros2_control xacro.");
 
   for (int i = 0; i < simulation_->model()->nu; i++)
   {
@@ -1723,23 +1735,6 @@ bool MujocoSystemInterface::register_mujoco_actuators()
       passive_actuator.mj_joint_type = simulation_->model()->jnt_type[jnt_id];
       passive_actuator.actuator_type = ActuatorType::PASSIVE;
       mujoco_actuator_data_.push_back(passive_actuator);
-    }
-  }
-
-  // Override initial positions with a keyframe if specified
-  if (!override_mujoco_actuator_positions_)
-  {
-    const std::string keyframe_name = get_hardware_parameter_or(get_hardware_info(), "initial_keyframe", "");
-    if (!keyframe_name.empty())
-    {
-      initial_keyframe_ = keyframe_name;
-      RCLCPP_INFO(get_logger(), "Applying initial keyframe: '%s'", initial_keyframe_.c_str());
-      override_mujoco_actuator_positions_ = simulation_->apply_keyframe(initial_keyframe_);
-      if (!override_mujoco_actuator_positions_)
-      {
-        RCLCPP_ERROR(get_logger(), "Failed to apply initial keyframe: '%s'", initial_keyframe_.c_str());
-        return false;
-      }
     }
   }
 
