@@ -433,10 +433,14 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
     node_options_arguments.push_back(pids_config_file.value());
     node_options.arguments(node_options_arguments);
   }
+  const std::string mujoco_model_topic =
+      get_hardware_parameter_or(get_hardware_info(), "mujoco_model_topic", "/mujoco_robot_description");
+  // LoadModel() reads the topic only when the file path is empty, so two topics are two scenes.
+  const std::string scene_key = model_path.empty() ? "topic:" + mujoco_model_topic : "file:" + model_path;
   {
     // Held through initialize(): a second component must not attach to a half-built simulation.
     const std::lock_guard<std::mutex> lock(g_shared_simulations_mutex);
-    shared_ = g_shared_simulations[model_path].lock();
+    shared_ = g_shared_simulations[scene_key].lock();
     is_sim_owner_ = !shared_;
     if (is_sim_owner_)
     {
@@ -449,9 +453,6 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
       shared->executor_thread = std::thread([executor = shared->executor.get()]() { executor->spin(); });
       RCLCPP_INFO(get_logger(), "Executor thread started.");
 
-      const std::string mujoco_model_topic =
-          get_hardware_parameter_or(get_hardware_info(), "mujoco_model_topic", "/mujoco_robot_description");
-
       // Construct the simulation wrapper with the loaded parameters.
       shared->simulation = std::make_unique<MujocoSimulation>();
       if (!shared->simulation->initialize(shared->node, model_path, mujoco_model_topic, sim_speed_factor, headless))
@@ -461,12 +462,12 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
       // Held until load_mujoco_plugins() returns, so no other write() reads plugin_instances mid-load.
       shared->plugin_driver = this;
       shared_ = shared;
-      g_shared_simulations[model_path] = shared_;
+      g_shared_simulations[scene_key] = shared_;
     }
     else
     {
       RCLCPP_INFO(get_logger(), "Attaching '%s' to the running simulation of '%s'.", get_hardware_info().name.c_str(),
-                  model_path.c_str());
+                  scene_key.c_str());
     }
   }
   simulation_ = shared_->simulation.get();
