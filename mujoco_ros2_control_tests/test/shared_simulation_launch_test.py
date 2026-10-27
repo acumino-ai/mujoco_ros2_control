@@ -19,7 +19,8 @@ from /device_a and device_b_joint from /device_b. Each component must stage only
 actuator's command, also after reset_world, which re-enables control on every actuator that a
 component registered. See stage_control_data() in mujoco_system_interface.cpp. The scene's plugins
 must keep running while either component is inactive. See plugin_driver in SharedSimulation. Both
-joints must start at the keyframe.
+joints must start at the keyframe and return to it on reset_world, also for device_b, which attaches
+to the scene after physics has run (see the launch file).
 """
 
 import os
@@ -28,7 +29,7 @@ import unittest
 
 from ament_index_python.packages import get_package_share_directory
 from controller_manager.test_utils import check_controllers_running
-from controller_manager_msgs.srv import SetHardwareComponentState
+from controller_manager_msgs.srv import SetHardwareComponentState, SwitchController
 from launch import LaunchDescription
 from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -210,3 +211,26 @@ class TestSharedSimulation(unittest.TestCase):
             )
             self.set_hardware_state(device, State.PRIMARY_STATE_ACTIVE)
 
+    def test_reset_world_returns_both_joints_to_the_keyframe(self):
+        # Runs last (alphabetical order): it stops the position controllers, which would otherwise
+        # drive the joints back to their last command after the reset.
+        self.drive({"device_a": -0.15, "device_b": 0.25})
+        for device in JOINTS:
+            client = self.node.create_client(SwitchController, f"/{device}/controller_manager/switch_controller")
+            self.assertTrue(client.wait_for_service(timeout_sec=10.0), f"/{device} switch_controller not available")
+            future = client.call_async(
+                SwitchController.Request(
+                    deactivate_controllers=["position_controller"], strictness=SwitchController.Request.STRICT
+                )
+            )
+            rclpy.spin_until_future_complete(self.node, future, timeout_sec=10.0)
+            self.assertTrue(future.result() and future.result().ok, f"Failed to stop /{device}/position_controller")
+
+        self.reset_world()
+        end_time = time.time() + 1.0
+        while time.time() < end_time:
+            rclpy.spin_once(self.node, timeout_sec=0.05)
+        for joint, start in KEYFRAME.items():
+            self.assertAlmostEqual(
+                self.positions[joint], start, delta=TOLERANCE, msg=f"{joint} at {self.positions[joint]} after reset"
+            )

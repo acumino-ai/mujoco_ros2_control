@@ -329,6 +329,47 @@ std::vector<std::string> get_interfaces_in_order(const std::vector<std::string>&
   return ordered_interfaces;
 }
 
+void seed_from_scene(MuJoCoActuatorData& actuator_data, const mjData* data)
+{
+  actuator_data.position_interface.state_ = data->qpos[actuator_data.mj_pos_adr];
+  actuator_data.velocity_interface.state_ = data->qvel[actuator_data.mj_vel_adr];
+  // We never set data for effort from an initial conditions file
+  actuator_data.effort_interface.state_ = 0.0;
+
+  if (actuator_data.actuator_type != ActuatorType::PASSIVE)
+  {
+    actuator_data.position_interface.command_ = actuator_data.position_interface.state_;
+    actuator_data.velocity_interface.command_ = actuator_data.velocity_interface.state_;
+    actuator_data.effort_interface.command_ = actuator_data.effort_interface.state_;
+  }
+}
+
+MujocoSimulation::StateEntries owned_state_entries(const mjModel* model, const std::vector<int>& actuator_ids)
+{
+  MujocoSimulation::StateEntries entries;
+  for (const int id : actuator_ids)
+  {
+    entries.ctrl.push_back(id);
+    if (model->actuator_trntype[id] != mjTRN_JOINT && model->actuator_trntype[id] != mjTRN_JOINTINPARENT)
+    {
+      continue;
+    }
+    const int joint = model->actuator_trnid[2 * id];
+    const int type = model->jnt_type[joint];
+    const int nq = type == mjJNT_FREE ? 7 : type == mjJNT_BALL ? 4 : 1;
+    const int nv = type == mjJNT_FREE ? 6 : type == mjJNT_BALL ? 3 : 1;
+    for (int k = 0; k < nq; ++k)
+    {
+      entries.qpos.push_back(model->jnt_qposadr[joint] + k);
+    }
+    for (int k = 0; k < nv; ++k)
+    {
+      entries.qvel.push_back(model->jnt_dofadr[joint] + k);
+    }
+  }
+  return entries;
+}
+
 MujocoSystemInterface::MujocoSystemInterface() = default;
 
 MujocoSystemInterface::~MujocoSystemInterface()
@@ -628,6 +669,17 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
     RCLCPP_FATAL(get_logger(), "Failed to register transmissions, exiting...");
     return hardware_interface::CallbackReturn::FAILURE;
   }
+  // Physics has run since the owner started it, so this component's joints may have left the start
+  // pose. Seed them from the stored start pose, not from where they are now.
+  const auto own_entries = owned_state_entries(simulation_->model(), owned_actuator_ids_);
+  if (!is_sim_owner_ && override_mujoco_actuator_positions_)
+  {
+    simulation_->restore_initial_state(own_entries);
+    for (const int id : owned_actuator_ids_)
+    {
+      seed_from_scene(mujoco_actuator_data_.at(id), simulation_->data());
+    }
+  }
   initialize_initial_positions(get_hardware_info());
   set_initial_pose();
 
@@ -641,9 +693,16 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
     return hardware_interface::CallbackReturn::FAILURE;
   }
 
-  // Store initial state for reset_world service. Each component captures again once its own initial
-  // pose is in, so the last capture holds every component's.
-  simulation_->capture_initial_state();
+  // Store initial state for reset_world service. Physics runs once the owner is in, so a later
+  // component stores only its own entries: a full capture would store the others' drifted state.
+  if (is_sim_owner_)
+  {
+    simulation_->capture_initial_state();
+  }
+  else
+  {
+    simulation_->capture_initial_state(own_entries);
+  }
   sim_lock.unlock();
 
   // This CB will be triggered by the MujocoSimulation after resettting the sim and qpos/qvel/ctrl have been restored.
@@ -1747,17 +1806,7 @@ bool MujocoSystemInterface::register_mujoco_actuators()
 
     for (auto& actuator_data : mujoco_actuator_data_)
     {
-      actuator_data.position_interface.state_ = simulation_->data()->qpos[actuator_data.mj_pos_adr];
-      actuator_data.velocity_interface.state_ = simulation_->data()->qvel[actuator_data.mj_vel_adr];
-      // We never set data for effort from an initial conditions file
-      actuator_data.effort_interface.state_ = 0.0;
-
-      if (actuator_data.actuator_type != ActuatorType::PASSIVE)
-      {
-        actuator_data.position_interface.command_ = actuator_data.position_interface.state_;
-        actuator_data.velocity_interface.command_ = actuator_data.velocity_interface.state_;
-        actuator_data.effort_interface.command_ = actuator_data.effort_interface.state_;
-      }
+      seed_from_scene(actuator_data, simulation_->data());
     }
   }
   return true;

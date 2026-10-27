@@ -186,6 +186,25 @@ public:
    */
   void capture_initial_state();
 
+  /// Addresses into qpos, qvel and ctrl.
+  struct StateEntries
+  {
+    std::vector<int> qpos;
+    std::vector<int> qvel;
+    std::vector<int> ctrl;
+  };
+
+  /**
+   * @brief Store the current value of only these entries as their "initial" state.
+   *
+   * For a component that attaches while physics runs: a full capture would also store every other
+   * entry in the state it drifted to since the start.
+   */
+  void capture_initial_state(const StateEntries& entries);
+
+  /// @brief Write the stored "initial" value of these entries into the data. Assumes sim_mutex_ is held.
+  void restore_initial_state(const StateEntries& entries);
+
   /**
    * @brief Register a callback function to be called on `reset_world_state`.
    */

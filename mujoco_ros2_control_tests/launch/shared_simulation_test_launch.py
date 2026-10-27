@@ -15,7 +15,7 @@
 import os
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction, Shutdown
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, Shutdown, TimerAction
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterFile, ParameterValue
@@ -58,8 +58,7 @@ def launch_setup(context, *args, **kwargs):
         }
         # Each manager reads its description from its own namespace. Humble's manager listens on
         # ~/robot_description instead, so point this device's publisher there.
-        nodes.append(
-            Node(
+        publisher = Node(
                 package="robot_state_publisher",
                 executable="robot_state_publisher",
                 namespace=device,
@@ -71,7 +70,9 @@ def launch_setup(context, *args, **kwargs):
                     else []
                 ),
             )
-        )
+        # device_b attaches after physics has run long enough for its uncontrolled joint to fall, so
+        # the tests see whether it seeds and stores its start pose from the keyframe or from the fall.
+        nodes.append(publisher if device == DEVICES[0] else TimerAction(period=2.0, actions=[publisher]))
         nodes.append(
             Node(
                 package="controller_manager",
