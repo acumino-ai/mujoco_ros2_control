@@ -421,11 +421,6 @@ private:
   std::unique_ptr<pluginlib::ClassLoader<transmission_interface::TransmissionLoader>> transmission_loader_ = nullptr;
   std::vector<std::shared_ptr<transmission_interface::Transmission>> transmission_instances_;
 
-  // Plugin loader and instances
-  std::unique_ptr<pluginlib::ClassLoader<mujoco_ros2_control_plugins::MuJoCoROS2ControlPluginBase>> plugin_loader_ =
-      nullptr;
-  std::vector<std::shared_ptr<mujoco_ros2_control_plugins::MuJoCoROS2ControlPluginBase>> plugin_instances_;
-
   std::vector<FTSensorData> ft_sensor_data_;
   std::vector<IMUSensorData> imu_sensor_data_;
   std::vector<SitePoseData> pose_sensor_data_;

@@ -1,5 +1,9 @@
 /**:
   ros__parameters:
+    # update() runs in one component's write(), so the test checks it survives that component's deactivation.
+    mujoco_plugins:
+      heartbeat:
+        type: mujoco_ros2_control_plugins/HeartbeatPublisherPlugin
     pid_gains:
       position:
         device_a_joint:

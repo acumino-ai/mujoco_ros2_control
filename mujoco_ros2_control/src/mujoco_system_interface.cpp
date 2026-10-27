@@ -93,6 +93,10 @@ namespace mujoco_ros2_control
 /// One physics world per mujoco_model, shared by every component in the process that loads it.
 struct SharedSimulation
 {
+  // Declared first, so destroyed last: unloading a plugin library while the node or the simulation
+  // still holds anything the plugin created would run freed code.
+  std::unique_ptr<pluginlib::ClassLoader<mujoco_ros2_control_plugins::MuJoCoROS2ControlPluginBase>> plugin_loader;
+
   std::shared_ptr<rclcpp::Node> node;
   std::unique_ptr<rclcpp::executors::MultiThreadedExecutor> executor;
   std::thread executor_thread;
@@ -113,6 +117,15 @@ struct SharedSimulation
   std::mutex reset_mutex;
   std::vector<std::pair<const MujocoSystemInterface*, MujocoSimulation::ResetCallback>> reset_callbacks;
 
+  // Plugins act on the whole scene, so they live as long as the scene and not as long as the
+  // component that loaded them.
+  std::vector<std::shared_ptr<mujoco_ros2_control_plugins::MuJoCoROS2ControlPluginBase>> plugin_instances;
+
+  // The one component whose write() runs plugin update(), guarded by control_mutex. Two drivers would
+  // step stateful plugins twice per cycle and both consume the single-consumer data snapshot.
+  // nullptr: the next component to write claims it.
+  const MujocoSystemInterface* plugin_driver{ nullptr };
+
   ~SharedSimulation()
   {
     // Stop the services before the simulation they call into goes away.
@@ -124,6 +137,19 @@ struct SharedSimulation
     {
       executor_thread.join();
     }
+    // The physics thread must not call pre_step on a plugin that cleanup() has stopped.
+    if (simulation)
+    {
+      simulation->set_pre_step_callback(nullptr);
+    }
+    for (auto& plugin : plugin_instances)
+    {
+      if (plugin)
+      {
+        plugin->cleanup();
+      }
+    }
+    plugin_instances.clear();
     simulation.reset();
   }
 };
@@ -311,28 +337,16 @@ MujocoSystemInterface::~MujocoSystemInterface()
                       callbacks.end());
     }
     const std::lock_guard<std::mutex> lock(shared_->control_mutex);
+    if (shared_->plugin_driver == this)
+    {
+      shared_->plugin_driver = nullptr;
+    }
     std::replace(shared_->ctrl_owner.begin(), shared_->ctrl_owner.end(),
                  static_cast<const MujocoSystemInterface*>(this), static_cast<const MujocoSystemInterface*>(nullptr));
     std::replace(shared_->qfrc_owner.begin(), shared_->qfrc_owner.end(),
                  static_cast<const MujocoSystemInterface*>(this), static_cast<const MujocoSystemInterface*>(nullptr));
   }
 
-  // We don't know what plugins are doing with the mj_data pointer, so be
-  // sure to kill callback so that nothing can access it on destruction.
-  if (is_sim_owner_ && simulation_)
-  {
-    simulation_->set_pre_step_callback(nullptr);
-  }
-
-  // Stop plugins
-  for (auto& plugin : plugin_instances_)
-  {
-    if (plugin)
-    {
-      plugin->cleanup();
-    }
-  }
-  plugin_instances_.clear();
   transmission_instances_.clear();
 
   if (mj_data_control_)
@@ -444,6 +458,8 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
       {
         return hardware_interface::CallbackReturn::ERROR;
       }
+      // Held until load_mujoco_plugins() returns, so no other write() reads plugin_instances mid-load.
+      shared->plugin_driver = this;
       shared_ = shared;
       g_shared_simulations[model_path] = shared_;
     }
@@ -614,10 +630,18 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
           shared->qfrc[i] = data->qfrc_applied[i];
         }
       }
-      const std::lock_guard<std::mutex> lock(shared->reset_mutex);
-      for (const auto& [component, callback] : shared->reset_callbacks)
       {
-        callback(fill_initial_state);
+        const std::lock_guard<std::mutex> lock(shared->reset_mutex);
+        for (const auto& [component, callback] : shared->reset_callbacks)
+        {
+          callback(fill_initial_state);
+        }
+      }
+      // Plugins own runtime state that the world reset has invalidated.
+      // eq_active has already been restored to MJCF defaults.
+      for (auto& plugin : shared->plugin_instances)
+      {
+        plugin->on_reset(shared->simulation->data());
       }
     });
   }
@@ -653,6 +677,8 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
   if (is_sim_owner_)
   {
     this->load_mujoco_plugins();
+    const std::lock_guard<std::mutex> lock(shared_->control_mutex);
+    shared_->plugin_driver = nullptr;
   }
 
   // Seed the control state before the component is activated.
@@ -1022,6 +1048,15 @@ MujocoSystemInterface::on_deactivate(const rclcpp_lifecycle::State& /*previous_s
 {
   RCLCPP_INFO(get_logger(), "Deactivating MuJoCo hardware interface and shutting down Simulate...");
 
+  // An inactive component gets no write(), so another one must run the plugins.
+  {
+    const std::lock_guard<std::mutex> lock(shared_->control_mutex);
+    if (shared_->plugin_driver == this)
+    {
+      shared_->plugin_driver = nullptr;
+    }
+  }
+
   // TODO: Should we shut MuJoCo things down here or in the destructor?
 
   return hardware_interface::CallbackReturn::SUCCESS;
@@ -1316,7 +1351,16 @@ hardware_interface::return_type MujocoSystemInterface::write(const rclcpp::Time&
 #endif
   };
 
-  mjData* control_data = plugin_instances_.empty() ? mj_data_control_ : simulation_->acquire_data_snapshot();
+  bool drives_plugins = false;
+  {
+    const std::lock_guard<std::mutex> lock(shared_->control_mutex);
+    if (!shared_->plugin_driver)
+    {
+      shared_->plugin_driver = this;
+    }
+    drives_plugins = shared_->plugin_driver == this && !shared_->plugin_instances.empty();
+  }
+  mjData* control_data = drives_plugins ? simulation_->acquire_data_snapshot() : mj_data_control_;
 
   // Mirror the sim's actual ctrl so entries we do not command below (e.g., passive actuators)
   // are staged with their current values rather than a possibly stale snapshot.
@@ -1355,9 +1399,12 @@ hardware_interface::return_type MujocoSystemInterface::write(const rclcpp::Time&
 
   // Update plugins, in order. This enables plugins to read and rewrite ctrl/qfrc_applied
   // immediately before they are sent to the simulation.
-  for (auto& plugin : plugin_instances_)
+  if (drives_plugins)
   {
-    plugin->update(simulation_->model(), control_data);
+    for (auto& plugin : shared_->plugin_instances)
+    {
+      plugin->update(simulation_->model(), control_data);
+    }
   }
 
   // Trigger to simulation to update its control inputs (this locks)
@@ -2596,13 +2643,6 @@ void MujocoSystemInterface::reset_simulation_state(bool /*fill_initial_state*/)
   push_bindings_to_interfaces(state_bindings_, /*wait_for_lock=*/false);
   push_bindings_to_interfaces(command_bindings_, /*wait_for_lock=*/true);
 #endif
-
-  // Notify plugins: they own runtime state that the world reset has invalidated.
-  // eq_active has already been restored to MJCF defaults.
-  for (auto& plugin : plugin_instances_)
-  {
-    plugin->on_reset(simulation_->data());
-  }
 }
 
 void MujocoSystemInterface::get_model(mjModel*& dest)
@@ -2634,7 +2674,7 @@ void MujocoSystemInterface::load_mujoco_plugins()
 {
   try
   {
-    plugin_loader_ = std::make_unique<pluginlib::ClassLoader<mujoco_ros2_control_plugins::MuJoCoROS2ControlPluginBase>>(
+    shared_->plugin_loader = std::make_unique<pluginlib::ClassLoader<mujoco_ros2_control_plugins::MuJoCoROS2ControlPluginBase>>(
         "mujoco_ros2_control_plugins", "mujoco_ros2_control_plugins::MuJoCoROS2ControlPluginBase");
 
     // Get list of plugins from parameter (if specified)
@@ -2669,10 +2709,10 @@ void MujocoSystemInterface::load_mujoco_plugins()
           continue;
         }
         const std::string plugin_type = get_node()->get_parameter(plugin_type_param).as_string();
-        auto plugin = plugin_loader_->createSharedInstance(plugin_type);
+        auto plugin = shared_->plugin_loader->createSharedInstance(plugin_type);
         if (plugin->init(get_node()->create_sub_node(plugin_name), simulation_->model(), simulation_->data()))
         {
-          plugin_instances_.push_back(plugin);
+          shared_->plugin_instances.push_back(plugin);
           RCLCPP_INFO(get_logger(), "Successfully loaded and initialized plugin: %s", plugin_name.c_str());
         }
         else
@@ -2700,8 +2740,8 @@ void MujocoSystemInterface::load_mujoco_plugins()
   }
 
   // Connect plugin pre-step callbacks directly to the physics simulation.
-  simulation_->set_pre_step_callback([this](mjData* data) {
-    for (auto& plugin : plugin_instances_)
+  simulation_->set_pre_step_callback([shared = shared_.get()](mjData* data) {
+    for (auto& plugin : shared->plugin_instances)
     {
       plugin->pre_step(data);
     }
@@ -2730,10 +2770,10 @@ bool MujocoSystemInterface::auto_register_plugin_if_needed(const std::string& pl
 
   try
   {
-    auto plugin = plugin_loader_->createSharedInstance(plugin_type);
+    auto plugin = shared_->plugin_loader->createSharedInstance(plugin_type);
     if (plugin->init(get_node()->create_sub_node(plugin_ns), simulation_->model(), simulation_->data()))
     {
-      plugin_instances_.push_back(plugin);
+      shared_->plugin_instances.push_back(plugin);
       RCLCPP_INFO(get_logger(), "Auto-registered plugin: %s", plugin_type.c_str());
     }
     else

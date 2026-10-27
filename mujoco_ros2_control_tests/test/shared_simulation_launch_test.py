@@ -17,7 +17,8 @@
 Regression test: two controller_managers in one process drive one MuJoCo scene, device_a_joint
 from /device_a and device_b_joint from /device_b. Each component must stage only its own
 actuator's command, also after reset_world, which re-enables control on every actuator that a
-component registered. See stage_control_data() in mujoco_system_interface.cpp.
+component registered. See stage_control_data() in mujoco_system_interface.cpp. The scene's plugins
+must keep running while either component is inactive. See plugin_driver in SharedSimulation.
 """
 
 import os
@@ -26,18 +27,20 @@ import unittest
 
 from ament_index_python.packages import get_package_share_directory
 from controller_manager.test_utils import check_controllers_running
+from controller_manager_msgs.srv import SetHardwareComponentState
 from launch import LaunchDescription
 from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_testing.actions import ReadyToTest
 from launch_testing.util import KeepAliveProc
 from launch_testing_ros import WaitForTopics
+from lifecycle_msgs.msg import State
 from mujoco_ros2_control_msgs.srv import ResetWorld
 import pytest
 import rclpy
 from rosgraph_msgs.msg import Clock
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64MultiArray
+from std_msgs.msg import Float64MultiArray, String
 
 JOINTS = {"device_a": "device_a_joint", "device_b": "device_b_joint"}
 TOLERANCE = 0.005
@@ -165,3 +168,33 @@ class TestSharedSimulation(unittest.TestCase):
             self.assertLess(
                 largest_step, MAX_FORCE_STEP, f"{joint} force jumped by {largest_step:.1f} N while holding still"
             )
+
+    def set_hardware_state(self, device, state_id):
+        client = self.node.create_client(
+            SetHardwareComponentState, f"/{device}/controller_manager/set_hardware_component_state"
+        )
+        self.assertTrue(client.wait_for_service(timeout_sec=10.0), f"/{device} hardware state service not available")
+        future = client.call_async(SetHardwareComponentState.Request(name=device, target_state=State(id=state_id)))
+        rclpy.spin_until_future_complete(self.node, future, timeout_sec=10.0)
+        self.assertTrue(future.result() and future.result().ok, f"Failed to set /{device} to state {state_id}")
+
+    def test_plugins_run_while_one_component_is_inactive(self):
+        # Runs last (alphabetical order): it toggles hardware state under the other tests' controllers.
+        topic = None
+        end_time = time.time() + 10.0
+        while topic is None and time.time() < end_time:
+            rclpy.spin_once(self.node, timeout_sec=0.1)
+            topic = next((n for n, _ in self.node.get_topic_names_and_types() if n.endswith("/mujoco_heartbeat")), None)
+        self.assertIsNotNone(topic, "No heartbeat topic from the plugin")
+        beats = []
+        self.node.create_subscription(String, topic, beats.append, 10)
+
+        # One of the two is the component that loaded the plugins.
+        for device in JOINTS:
+            self.set_hardware_state(device, State.PRIMARY_STATE_INACTIVE)
+            beats.clear()
+            self.assertTrue(
+                self.spin_until(lambda: len(beats) >= 2, timeout=10.0), f"Plugins stopped while /{device} is inactive"
+            )
+            self.set_hardware_state(device, State.PRIMARY_STATE_ACTIVE)
+

@@ -29,6 +29,7 @@
   <test_depend>launch_testing</test_depend>
   <test_depend>launch_testing_ament_cmake</test_depend>
   <test_depend>launch_testing_ros</test_depend>
+  <test_depend>lifecycle_msgs</test_depend>
   <test_depend>mujoco_3d_lidar</test_depend>
   <test_depend>mujoco_ros2_control</test_depend>
   <test_depend>mujoco_ros2_control_demos</test_depend>
