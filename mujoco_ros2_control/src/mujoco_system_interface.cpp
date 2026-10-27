@@ -113,7 +113,7 @@ struct SharedSimulation
   bool seeded_from_scene{ false };
 
   // Latest command per actuator (ctrl) and dof (qfrc_applied), and the component that writes it.
-  // nullptr entries belong to no component and keep the sim's own value.
+  // nullptr entries belong to no component: plugin_driver writes them, see stage_control_data().
   std::mutex control_mutex;
   std::vector<const MujocoSystemInterface*> ctrl_owner;
   std::vector<mjtNum> ctrl;
@@ -1552,24 +1552,31 @@ void MujocoSystemInterface::stage_control_data(mjData* control_data)
 {
   // Held through apply_control_data so two components cannot interleave their merges.
   const std::lock_guard<std::mutex> lock(shared_->control_mutex);
+  // An entry no component owns carries the plugins' output, so the plugin driver writes it. Without
+  // this, the next component would stage its stale local value over that output.
+  // ponytail: a plugin's write to another component's entry is still replaced by that component's
+  // cached command. Keeping it needs plugins to run once per cycle on the merged commands.
+  const auto writer = [this](const MujocoSystemInterface* owner) { return owner ? owner : shared_->plugin_driver; };
   for (size_t i = 0; i < shared_->ctrl_owner.size(); ++i)
   {
-    if (shared_->ctrl_owner[i] == this)
+    const auto* owner = writer(shared_->ctrl_owner[i]);
+    if (owner == this)
     {
       shared_->ctrl[i] = control_data->ctrl[i];
     }
-    else if (shared_->ctrl_owner[i])
+    else if (owner)
     {
       control_data->ctrl[i] = shared_->ctrl[i];
     }
   }
   for (size_t i = 0; i < shared_->qfrc_owner.size(); ++i)
   {
-    if (shared_->qfrc_owner[i] == this)
+    const auto* owner = writer(shared_->qfrc_owner[i]);
+    if (owner == this)
     {
       shared_->qfrc[i] = control_data->qfrc_applied[i];
     }
-    else if (shared_->qfrc_owner[i])
+    else if (owner)
     {
       control_data->qfrc_applied[i] = shared_->qfrc[i];
     }

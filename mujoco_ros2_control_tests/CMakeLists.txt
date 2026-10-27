@@ -40,6 +40,14 @@ if(BUILD_TESTING)
     hardware_interface::hardware_interface
   )
 
+  # A component that runs no plugins must not clear the plugins' output on an unowned joint.
+  ament_add_gtest(test_plugin_output_staging test/test_plugin_output_staging.cpp)
+  target_link_libraries(test_plugin_output_staging
+    ${mujoco_ros2_control_TARGETS}
+    rclcpp::rclcpp
+    hardware_interface::hardware_interface
+  )
+
   install(
     DIRECTORY launch config test_resources
     DESTINATION share/${PROJECT_NAME}
