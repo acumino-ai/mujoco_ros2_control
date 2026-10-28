@@ -105,9 +105,9 @@ struct SharedSimulation
   // PID gains live on the shared node, which only the owner's file configures.
   std::optional<std::string> pids_config_file;
 
-  // The owner's initial_keyframe and override_start_position_file. Another component may repeat a
-  // value but not change it, since each one resets the whole scene.
-  std::map<std::string, std::string> start_settings;
+  // The owner's values of the parameters that only the owner applies. Another component may repeat
+  // a value but not change it, since the scene would silently ignore the change.
+  std::map<std::string, std::string> scene_settings;
   // True when the owner wrote a start pose into qpos. Every component then seeds its joints from
   // qpos, not from its URDF initial values, which would move the joints away from that pose.
   bool seeded_from_scene{ false };
@@ -514,12 +514,13 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
 
       // Applied before the registry entry exists: a component that attaches must read the start pose from qpos.
       simulation_ = shared->simulation.get();
-      for (const char* key : { "initial_keyframe", "override_start_position_file" })
+      for (const char* key : { "initial_keyframe", "override_start_position_file", "headless", "sim_speed_factor",
+                               "odom_free_joint_name", "odom_topic" })
       {
-        shared->start_settings[key] = get_hardware_parameter_or(get_hardware_info(), key, "");
+        shared->scene_settings[key] = get_hardware_parameter_or(get_hardware_info(), key, "");
       }
-      const std::string& start_position_file = shared->start_settings["override_start_position_file"];
-      const std::string& initial_keyframe = shared->start_settings["initial_keyframe"];
+      const std::string& start_position_file = shared->scene_settings["override_start_position_file"];
+      const std::string& initial_keyframe = shared->scene_settings["initial_keyframe"];
       if (!start_position_file.empty())
       {
         shared->seeded_from_scene = set_override_start_positions(start_position_file);
@@ -565,14 +566,15 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
                    "shared node, so every component of one mujoco_model must pass the same file.");
       return hardware_interface::CallbackReturn::ERROR;
     }
-    for (const auto& [key, owner_value] : shared_->start_settings)
+    for (const auto& [key, owner_value] : shared_->scene_settings)
     {
       const std::string value = get_hardware_parameter_or(get_hardware_info(), key, "");
       if (!value.empty() && value != owner_value)
       {
         RCLCPP_FATAL(get_logger(),
-                     "'%s' differs from the one the simulation was started with. It resets the whole scene, so "
-                     "every component of one mujoco_model must pass the same value or none.",
+                     "'%s' differs from the one the simulation was started with. Only the component that "
+                     "started it applies this value, so every component of one mujoco_model must pass the same "
+                     "value or none.",
                      key.c_str());
         return hardware_interface::CallbackReturn::ERROR;
       }

@@ -737,6 +737,22 @@ TEST_F(MujocoSystemInterfaceTest, DuplicateClaimLeavesOwnersJointUntouched)
   std::filesystem::remove(kTwoJointModelPath);
 }
 
+// Only the owner applies sim_speed_factor, so a different value on another component would be
+// silently ignored.
+TEST_F(MujocoSystemInterfaceTest, AttacherWithDifferentSceneSettingFails)
+{
+  interface_.reset();
+  write_two_joint_model();
+  mujoco_ros2_control::MujocoSystemInterface owner;
+  ASSERT_EQ(init_component(owner, with_joint(create_hardware_info(), "joint_a", "0.0")),
+            hardware_interface::CallbackReturn::SUCCESS);
+  auto attacher_info = with_joint(create_hardware_info(), "joint_b", "0.0");
+  attacher_info.hardware_parameters["sim_speed_factor"] = "2.0";
+  mujoco_ros2_control::MujocoSystemInterface attacher;
+  EXPECT_EQ(init_component(attacher, attacher_info), hardware_interface::CallbackReturn::ERROR);
+  std::filesystem::remove(kTwoJointModelPath);
+}
+
 TEST(GetNoiseDistributionTest, DefaultsToGaussianWhenParamAbsent)
 {
   hardware_interface::ComponentInfo sensor;
