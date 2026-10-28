@@ -1,29 +1,28 @@
-device_a:
-  controller_manager:
-    ros__parameters:
-      update_rate: 500
-      joint_state_broadcaster:
-        type: joint_state_broadcaster/JointStateBroadcaster
-      position_controller:
-        type: forward_command_controller/ForwardCommandController
+# Flat /<ns>/<node> keys: the spawner looks up a controller's parameters only under its full name.
+/device_a/controller_manager:
+  ros__parameters:
+    update_rate: 500
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+    position_controller:
+      type: forward_command_controller/ForwardCommandController
 
-  position_controller:
-    ros__parameters:
-      interface_name: position
-      joints:
-        - device_a_joint
+/device_a/position_controller:
+  ros__parameters:
+    interface_name: position
+    joints:
+      - device_a_joint
 
-device_b:
-  controller_manager:
-    ros__parameters:
-      update_rate: 500
-      joint_state_broadcaster:
-        type: joint_state_broadcaster/JointStateBroadcaster
-      position_controller:
-        type: forward_command_controller/ForwardCommandController
+/device_b/controller_manager:
+  ros__parameters:
+    update_rate: 500
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+    position_controller:
+      type: forward_command_controller/ForwardCommandController
 
-  position_controller:
-    ros__parameters:
-      interface_name: position
-      joints:
-        - device_b_joint
+/device_b/position_controller:
+  ros__parameters:
+    interface_name: position
+    joints:
+      - device_b_joint

@@ -77,6 +77,8 @@ def launch_setup(context, *args, **kwargs):
             Node(
                 package="controller_manager",
                 executable="spawner",
+                # The spawner looks up the controller's parameters under its own namespace.
+                namespace=device,
                 arguments=[
                     "-c",
                     f"/{device}/controller_manager",
