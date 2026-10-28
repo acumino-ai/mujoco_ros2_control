@@ -1,0 +1,31 @@
+<mujoco model="shared_simulation_robot">
+  <compiler angle="radian"/>
+  <!-- Vertical slides under gravity: each joint holds a steady ~20 N, which a component that
+       restages the other's actuator would drop. -->
+  <option timestep="0.001"/>
+
+  <worldbody>
+    <body name="device_a_link" pos="0 0.1 0">
+      <inertial pos="0 0 0" mass="2.0" diaginertia="0.01 0.01 0.01"/>
+      <joint name="device_a_joint" type="slide" axis="0 0 1" range="-0.5 0.5" damping="1.0"/>
+      <geom name="device_a_geom" type="box" size="0.02 0.02 0.02" rgba="0.8 0.4 0.1 1"/>
+    </body>
+    <body name="device_b_link" pos="0 -0.1 0">
+      <inertial pos="0 0 0" mass="2.0" diaginertia="0.01 0.01 0.01"/>
+      <joint name="device_b_joint" type="slide" axis="0 0 1" range="-0.5 0.5" damping="1.0"/>
+      <geom name="device_b_geom" type="box" size="0.02 0.02 0.02" rgba="0.1 0.4 0.8 1"/>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <!-- Motors take force, so position commands go through the software PIDs: the path on which
+         one component used to restage the other's actuators. -->
+    <motor name="device_a_joint" joint="device_a_joint" ctrlrange="-50 50"/>
+    <motor name="device_b_joint" joint="device_b_joint" ctrlrange="-50 50"/>
+  </actuator>
+
+  <keyframe>
+    <!-- Away from the URDF initial_value of 0.0, so a component that seeds from its URDF moves its joint. -->
+    <key name="start" qpos="0.1 -0.2"/>
+  </keyframe>
+</mujoco>

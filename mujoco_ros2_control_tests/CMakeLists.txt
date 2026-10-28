@@ -30,12 +30,24 @@ if(BUILD_TESTING)
     mujoco_ros2_control_plugins src/test_plugin.xml
   )
 
+  # Isolated, like the launch tests: each test serves /mujoco_ros2_control_node/reset_world, and a
+  # parallel test on the same ROS_DOMAIN_ID would answer the other's calls.
+  find_package(ament_cmake_ros REQUIRED)
+
   # End-to-end check that reset_world dispatches on_reset() to loaded plugins.
-  ament_add_gtest(test_world_reset_dispatch test/test_world_reset_dispatch.cpp)
+  ament_add_ros_isolated_gtest(test_world_reset_dispatch test/test_world_reset_dispatch.cpp)
   target_link_libraries(test_world_reset_dispatch
     ${mujoco_ros2_control_TARGETS}
     ${mujoco_ros2_control_msgs_TARGETS}
     ${std_msgs_TARGETS}
+    rclcpp::rclcpp
+    hardware_interface::hardware_interface
+  )
+
+  # A component that runs no plugins must not clear the plugins' output on an unowned joint.
+  ament_add_ros_isolated_gtest(test_plugin_output_staging test/test_plugin_output_staging.cpp)
+  target_link_libraries(test_plugin_output_staging
+    ${mujoco_ros2_control_TARGETS}
     rclcpp::rclcpp
     hardware_interface::hardware_interface
   )
@@ -45,7 +57,6 @@ if(BUILD_TESTING)
     DESTINATION share/${PROJECT_NAME}
   )
 
-  find_package(ament_cmake_ros REQUIRED)
   find_package(launch_testing_ament_cmake REQUIRED)
 
   # Run each launch test with a unique ROS_DOMAIN_ID so concurrent or
@@ -84,6 +95,10 @@ if(BUILD_TESTING)
   )
 
   add_ros_isolated_launch_test(test/direct_match_transmission_launch_test.py
+    TIMEOUT 75
+  )
+
+  add_ros_isolated_launch_test(test/shared_simulation_launch_test.py
     TIMEOUT 75
   )
 endif()

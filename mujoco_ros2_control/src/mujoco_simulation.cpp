@@ -778,6 +778,39 @@ void MujocoSimulation::capture_initial_state()
   initial_ctrl_.assign(mj_data_->ctrl, mj_data_->ctrl + mj_model_->nu);
 }
 
+void MujocoSimulation::capture_initial_state(const StateEntries& entries)
+{
+  const std::unique_lock<std::recursive_mutex> lock(*sim_mutex_);
+  for (const int i : entries.qpos)
+  {
+    initial_qpos_.at(i) = mj_data_->qpos[i];
+  }
+  for (const int i : entries.qvel)
+  {
+    initial_qvel_.at(i) = mj_data_->qvel[i];
+  }
+  for (const int i : entries.ctrl)
+  {
+    initial_ctrl_.at(i) = mj_data_->ctrl[i];
+  }
+}
+
+void MujocoSimulation::restore_initial_state(const StateEntries& entries)
+{
+  for (const int i : entries.qpos)
+  {
+    mj_data_->qpos[i] = initial_qpos_.at(i);
+  }
+  for (const int i : entries.qvel)
+  {
+    mj_data_->qvel[i] = initial_qvel_.at(i);
+  }
+  for (const int i : entries.ctrl)
+  {
+    mj_data_->ctrl[i] = initial_ctrl_.at(i);
+  }
+}
+
 void MujocoSimulation::set_reset_callback(ResetCallback callback)
 {
   reset_callback_ = std::move(callback);

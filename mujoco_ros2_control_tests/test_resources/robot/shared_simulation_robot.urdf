@@ -1,0 +1,54 @@
+<?xml version="1.0"?>
+<!--
+  One device of the shared simulation scene. Rendered once per device, each copy goes to its own
+  controller_manager, and both copies point at the same mujoco_model. See
+  shared_simulation_launch_test.py.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="shared_simulation_robot">
+  <xacro:arg name="device" default="device_a"/>
+  <xacro:arg name="headless" default="true"/>
+  <xacro:property name="device" value="$(arg device)"/>
+
+  <link name="world"/>
+
+  <link name="${device}_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="2.0"/>
+      <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.01"/>
+    </inertial>
+  </link>
+
+  <joint name="${device}_joint" type="prismatic">
+    <parent link="world"/>
+    <child link="${device}_link"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.5" upper="0.5" velocity="1.0" effort="50.0"/>
+  </joint>
+
+  <ros2_control name="${device}" type="system">
+    <hardware>
+      <plugin>mujoco_ros2_control/MujocoSystemInterface</plugin>
+      <param name="mujoco_model">
+        $(find mujoco_ros2_control_tests)/test_resources/scenes/shared_simulation_scene.xml
+      </param>
+      <!-- Every device of one scene must pass the same file: the gains live on the shared node. -->
+      <param name="pids_config_file">
+        $(find mujoco_ros2_control_tests)/config/shared_simulation_pids.yaml
+      </param>
+      <!-- Every device passes the same keyframe: only the first one applies it, the rest seed from it. -->
+      <param name="initial_keyframe">start</param>
+      <param name="sim_speed_factor">1.0</param>
+      <param name="headless">$(arg headless)</param>
+    </hardware>
+
+    <joint name="${device}_joint">
+      <command_interface name="position"/>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+  </ros2_control>
+</robot>

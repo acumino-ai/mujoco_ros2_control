@@ -629,6 +629,130 @@ TEST_F(MujocoSystemInterfaceTest, MagnetometerSensorNoiseSupportsUniformDistribu
   EXPECT_NEAR(stats.stddev, kNoiseStdDev, kNoiseStdDev * 0.2);
 }
 
+namespace
+{
+
+// Two independent position-controlled joints, so two components can share one scene.
+const std::string kTwoJointModelPath = "/tmp/test_mujoco_system_interface_two_joint_model.xml";
+void write_two_joint_model()
+{
+  std::ofstream file(kTwoJointModelPath);
+  file << R"(<mujoco><worldbody>
+    <body name="a"><joint name="joint_a" type="hinge"/><geom size="0.1" mass="1"/></body>
+    <body name="b" pos="1 0 0"><joint name="joint_b" type="hinge"/><geom size="0.1" mass="1"/></body>
+  </worldbody><actuator>
+    <position name="joint_a" joint="joint_a" kp="10"/>
+    <position name="joint_b" joint="joint_b" kp="10"/>
+  </actuator></mujoco>)";
+}
+
+// Adds one position-controlled joint of the two-joint model to `info`.
+hardware_interface::HardwareInfo with_joint(hardware_interface::HardwareInfo info, const std::string& joint_name,
+                                            const std::string& initial_position)
+{
+  info.name = "component_" + joint_name;
+  info.hardware_parameters["mujoco_model"] = kTwoJointModelPath;
+  hardware_interface::ComponentInfo joint_info;
+  joint_info.name = joint_name;
+  hardware_interface::InterfaceInfo position;
+  position.name = hardware_interface::HW_IF_POSITION;
+  joint_info.command_interfaces.push_back(position);
+  position.initial_value = initial_position;
+  joint_info.state_interfaces.push_back(position);
+  info.joints.push_back(joint_info);
+  return info;
+}
+
+// Catches, so a throw fails the test and does not terminate on a joinable thread.
+hardware_interface::CallbackReturn init_component(mujoco_ros2_control::MujocoSystemInterface& component,
+                                                  const hardware_interface::HardwareInfo& info)
+{
+  try
+  {
+#if ROS_DISTRO_HUMBLE
+    return component.on_init(info);
+#else
+    hardware_interface::HardwareComponentInterfaceParams params;
+    params.hardware_info = info;
+    return component.on_init(params);
+#endif
+  }
+  catch (const std::exception& e)
+  {
+    ADD_FAILURE() << info.name << " threw: " << e.what();
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+}
+
+}  // namespace
+
+// An attacher that ran between the owner's registration and its capture_initial_state() threw
+// out_of_range on the empty initial state. The window is narrow, so the test repeats the race.
+TEST_F(MujocoSystemInterfaceTest, ConcurrentInitOnSharedSceneSucceeds)
+{
+  // TearDown deactivates interface_, which this test never initializes.
+  interface_.reset();
+  write_two_joint_model();
+  const auto info_a = with_joint(create_hardware_info(), "joint_a", "0.0");
+  const auto info_b = with_joint(create_hardware_info(), "joint_b", "0.0");
+
+  for (int attempt = 0; attempt < 20; ++attempt)
+  {
+    // Fresh components each attempt: the scene leaves the registry when both are destroyed.
+    mujoco_ros2_control::MujocoSystemInterface component_a;
+    mujoco_ros2_control::MujocoSystemInterface component_b;
+    auto result_a = hardware_interface::CallbackReturn::ERROR;
+    std::thread thread_a([&]() { result_a = init_component(component_a, info_a); });
+    const auto result_b = init_component(component_b, info_b);
+    thread_a.join();
+    ASSERT_EQ(result_a, hardware_interface::CallbackReturn::SUCCESS) << "attempt " << attempt;
+    ASSERT_EQ(result_b, hardware_interface::CallbackReturn::SUCCESS) << "attempt " << attempt;
+  }
+  std::filesystem::remove(kTwoJointModelPath);
+}
+
+// A component that claims an actuator another one drives must fail without writing to it. It once
+// wrote its own start position and ctrl into the joint first, and the joint stayed there.
+TEST_F(MujocoSystemInterfaceTest, DuplicateClaimLeavesOwnersJointUntouched)
+{
+  interface_.reset();
+  write_two_joint_model();
+  mujoco_ros2_control::MujocoSystemInterface owner;
+  ASSERT_EQ(init_component(owner, with_joint(create_hardware_info(), "joint_a", "0.0")),
+            hardware_interface::CallbackReturn::SUCCESS);
+  mujoco_ros2_control::MujocoSystemInterface duplicate;
+  ASSERT_EQ(init_component(duplicate, with_joint(create_hardware_info(), "joint_a", "1.0")),
+            hardware_interface::CallbackReturn::FAILURE);
+
+  mjModel* model = nullptr;
+  mjData* data = nullptr;
+  owner.get_model(model);
+  owner.get_data(data);
+  ASSERT_NE(data, nullptr);
+  const int actuator_id = mj_name2id(model, mjOBJ_ACTUATOR, "joint_a");
+  EXPECT_EQ(data->ctrl[actuator_id], 0.0);
+  EXPECT_NEAR(data->qpos[model->jnt_qposadr[mj_name2id(model, mjOBJ_JOINT, "joint_a")]], 0.0, 1e-6);
+  mj_deleteData(data);
+  mj_deleteModel(model);
+  std::filesystem::remove(kTwoJointModelPath);
+}
+
+// Only the owner applies sim_speed_factor, so a different value on another component would be
+// silently ignored.
+TEST_F(MujocoSystemInterfaceTest, AttacherWithDifferentSceneSettingFails)
+{
+  interface_.reset();
+  write_two_joint_model();
+  mujoco_ros2_control::MujocoSystemInterface owner;
+  ASSERT_EQ(init_component(owner, with_joint(create_hardware_info(), "joint_a", "0.0")),
+            hardware_interface::CallbackReturn::SUCCESS);
+  auto attacher_info = with_joint(create_hardware_info(), "joint_b", "0.0");
+  attacher_info.hardware_parameters["sim_speed_factor"] = "2.0";
+  mujoco_ros2_control::MujocoSystemInterface attacher;
+  EXPECT_EQ(init_component(attacher, attacher_info), hardware_interface::CallbackReturn::ERROR);
+  std::filesystem::remove(kTwoJointModelPath);
+}
+
 TEST(GetNoiseDistributionTest, DefaultsToGaussianWhenParamAbsent)
 {
   hardware_interface::ComponentInfo sensor;

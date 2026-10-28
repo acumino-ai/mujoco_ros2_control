@@ -64,6 +64,9 @@ public:
    * @brief Called once per control cycle, on the control thread. Default does nothing.
    * @param model Pointer to the MuJoCo model
    * @param data Pointer to a recent snapshot (not the live `mj_data_`)
+   * @note When several hardware components share one scene, a ctrl write to an actuator that another
+   * component drives does not reach the scene: that component's command replaces it. Use pre_step()
+   * for output on such actuators. qfrc_applied writes reach the scene on every joint.
    */
   virtual void update(const mjModel* /*model*/, mjData* /*data*/)
   {

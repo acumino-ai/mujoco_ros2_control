@@ -3,7 +3,7 @@
          type="external_plugin_test::TestPlugin"
          base_class_type="mujoco_ros2_control_plugins::MuJoCoROS2ControlPluginBase">
     <description>
-      Empty, do nothing plugin just to make sure the plugins library is compilable / linkable.
+      Test plugin: counts world resets, and writes a fixed force on a joint named plugin_driven.
     </description>
   </class>
 </library>
