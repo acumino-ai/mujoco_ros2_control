@@ -455,15 +455,16 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
 
   // Construct and start the ROS node spinning
   /// The PIDs config file
-  const auto pids_config_file = get_hardware_parameter(get_hardware_info(), "pids_config_file");
+  auto pids_config_file = get_hardware_parameter(get_hardware_info(), "pids_config_file");
   rclcpp::NodeOptions node_options;
   node_options.append_parameter_override("use_sim_time", rclcpp::ParameterValue(true));
   node_options.automatically_declare_parameters_from_overrides(true);
   node_options.allow_undeclared_parameters(true);
   if (pids_config_file.has_value())
   {
-    std::string pids_config_file_path = pids_config_file.value();
-    // trim the trailing and leading whitespaces
+    // Humble's URDF parser keeps the whitespace of a multi-line <param>, and rcl fails to open the
+    // untrimmed path passed to --params-file.
+    std::string& pids_config_file_path = *pids_config_file;
     pids_config_file_path.erase(0, pids_config_file_path.find_first_not_of(" \t\n\r\f\v"));
     pids_config_file_path.erase(pids_config_file_path.find_last_not_of(" \t\n\r\f\v") + 1);
 
