@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Two components share one scene and only the first runs plugins. TestPlugin writes a force on a
-// joint that no component commands. The second component's write() must not stage its own stale
-// value over that force. See stage_control_data() in mujoco_system_interface.cpp.
+// Two components share one scene and only the first runs plugins. TestPlugin writes a force on the
+// plugin_driven joint. The second component's write() must not stage its own stale value over that
+// force, also when it drives that joint. See stage_control_data() in mujoco_system_interface.cpp.
 
 #include <gtest/gtest.h>
 
@@ -49,6 +49,7 @@ constexpr const char* kTestModel = R"(<?xml version="1.0"?>
   <actuator>
     <motor name="a" joint="a"/>
     <motor name="b" joint="b"/>
+    <motor name="plugin_driven" joint="plugin_driven"/>
   </actuator>
 </mujoco>
 )";
@@ -99,7 +100,11 @@ hardware_interface::CallbackReturn init_component(mujoco_ros2_control::MujocoSys
 
 }  // namespace
 
-TEST(PluginOutputStaging, ComponentWithoutPluginsKeepsPluginForceOnUnownedJoint)
+namespace
+{
+
+// The first component drives joint a and runs the plugins. The second drives `second_joint`.
+void expect_plugin_force_survives(const std::string& second_joint)
 {
   rclcpp::init(0, nullptr);
   write_file(kTestModelPath, kTestModel);
@@ -108,7 +113,7 @@ TEST(PluginOutputStaging, ComponentWithoutPluginsKeepsPluginForceOnUnownedJoint)
     mujoco_ros2_control::MujocoSystemInterface first;
     ASSERT_EQ(init_component(first, "a"), hardware_interface::CallbackReturn::SUCCESS);
     mujoco_ros2_control::MujocoSystemInterface second;
-    ASSERT_EQ(init_component(second, "b"), hardware_interface::CallbackReturn::SUCCESS);
+    ASSERT_EQ(init_component(second, second_joint), hardware_interface::CallbackReturn::SUCCESS);
 
     // The first write claims the plugin driver. The second write is the one that used to clear the force.
     const rclcpp::Duration period(0, 2000000);
@@ -128,4 +133,17 @@ TEST(PluginOutputStaging, ComponentWithoutPluginsKeepsPluginForceOnUnownedJoint)
   std::filesystem::remove(kTestModelPath);
   std::filesystem::remove(kPluginParamsPath);
   rclcpp::shutdown();
+}
+
+}  // namespace
+
+TEST(PluginOutputStaging, ComponentWithoutPluginsKeepsPluginForceOnUnownedJoint)
+{
+  expect_plugin_force_survives("b");
+}
+
+// A component once claimed the qfrc_applied of the joints it drives and staged its stale value there.
+TEST(PluginOutputStaging, ComponentWithoutPluginsKeepsPluginForceOnItsOwnJoint)
+{
+  expect_plugin_force_survives("plugin_driven");
 }

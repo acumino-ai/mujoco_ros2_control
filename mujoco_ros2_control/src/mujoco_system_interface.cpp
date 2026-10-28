@@ -112,12 +112,12 @@ struct SharedSimulation
   // qpos, not from its URDF initial values, which would move the joints away from that pose.
   bool seeded_from_scene{ false };
 
-  // Latest command per actuator (ctrl) and dof (qfrc_applied), and the component that writes it.
-  // nullptr entries belong to no component: plugin_driver writes them, see stage_control_data().
+  // Latest command per actuator (ctrl), and the component that writes it. nullptr entries belong
+  // to no component: plugin_driver writes them, see stage_control_data().
   std::mutex control_mutex;
   std::vector<const MujocoSystemInterface*> ctrl_owner;
   std::vector<mjtNum> ctrl;
-  std::vector<const MujocoSystemInterface*> qfrc_owner;
+  // Latest qfrc_applied. Only plugins write it, so plugin_driver writes every entry.
   std::vector<mjtNum> qfrc;
 
   // MujocoSimulation holds one reset callback; the owner installs a fan-out over these.
@@ -390,8 +390,6 @@ MujocoSystemInterface::~MujocoSystemInterface()
       shared_->plugin_driver = nullptr;
     }
     std::replace(shared_->ctrl_owner.begin(), shared_->ctrl_owner.end(),
-                 static_cast<const MujocoSystemInterface*>(this), static_cast<const MujocoSystemInterface*>(nullptr));
-    std::replace(shared_->qfrc_owner.begin(), shared_->qfrc_owner.end(),
                  static_cast<const MujocoSystemInterface*>(this), static_cast<const MujocoSystemInterface*>(nullptr));
   }
 
@@ -1539,8 +1537,7 @@ bool MujocoSystemInterface::claim_actuators()
   {
     shared_->ctrl_owner.assign(model->nu, nullptr);
     shared_->ctrl.assign(model->nu, 0.0);
-    shared_->qfrc_owner.assign(model->nv, nullptr);
-    shared_->qfrc.assign(model->nv, 0.0);
+    shared_->qfrc.assign(data->qfrc_applied, data->qfrc_applied + model->nv);
   }
   for (const int id : owned_actuator_ids_)
   {
@@ -1553,14 +1550,6 @@ bool MujocoSystemInterface::claim_actuators()
     }
     shared_->ctrl_owner[id] = this;
     shared_->ctrl[id] = data->ctrl[id];
-    // Plugins may apply generalized forces on the joints this component drives. Site actuators have
-    // no joint, and their mj_vel_adr is not a dof.
-    const int dof = mujoco_actuator_data_.at(id).mj_vel_adr;
-    if (model->actuator_trntype[id] != mjTRN_SITE && dof >= 0 && dof < model->nv)
-    {
-      shared_->qfrc_owner[dof] = this;
-      shared_->qfrc[dof] = data->qfrc_applied[dof];
-    }
   }
   return true;
 }
@@ -1571,8 +1560,8 @@ void MujocoSystemInterface::stage_control_data(mjData* control_data)
   const std::lock_guard<std::mutex> lock(shared_->control_mutex);
   // An entry no component owns carries the plugins' output, so the plugin driver writes it. Without
   // this, the next component would stage its stale local value over that output.
-  // ponytail: a plugin's write to another component's entry is still replaced by that component's
-  // cached command. Keeping it needs plugins to run once per cycle on the merged commands.
+  // ponytail: a plugin's ctrl write to another component's actuator is still replaced by that
+  // component's cached command. Keeping it needs plugins to run once per cycle on the merged commands.
   const auto writer = [this](const MujocoSystemInterface* owner) { return owner ? owner : shared_->plugin_driver; };
   for (size_t i = 0; i < shared_->ctrl_owner.size(); ++i)
   {
@@ -1586,17 +1575,13 @@ void MujocoSystemInterface::stage_control_data(mjData* control_data)
       control_data->ctrl[i] = shared_->ctrl[i];
     }
   }
-  for (size_t i = 0; i < shared_->qfrc_owner.size(); ++i)
+  if (shared_->plugin_driver == this)
   {
-    const auto* owner = writer(shared_->qfrc_owner[i]);
-    if (owner == this)
-    {
-      shared_->qfrc[i] = control_data->qfrc_applied[i];
-    }
-    else if (owner)
-    {
-      control_data->qfrc_applied[i] = shared_->qfrc[i];
-    }
+    std::copy(control_data->qfrc_applied, control_data->qfrc_applied + shared_->qfrc.size(), shared_->qfrc.begin());
+  }
+  else if (shared_->plugin_driver)
+  {
+    std::copy(shared_->qfrc.begin(), shared_->qfrc.end(), control_data->qfrc_applied);
   }
   simulation_->apply_control_data(control_data);
 }
