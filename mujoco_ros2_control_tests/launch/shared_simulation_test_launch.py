@@ -77,7 +77,14 @@ def launch_setup(context, *args, **kwargs):
             Node(
                 package="controller_manager",
                 executable="spawner",
-                arguments=["-c", f"/{device}/controller_manager", "joint_state_broadcaster", "position_controller"],
+                arguments=[
+                    "-c",
+                    f"/{device}/controller_manager",
+                    "joint_state_broadcaster",
+                    "position_controller",
+                    "--param-file",
+                    parameters_file,
+                ],
                 output="both",
             )
         )
