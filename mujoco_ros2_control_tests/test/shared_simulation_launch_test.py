@@ -35,12 +35,10 @@ from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_testing.actions import ReadyToTest
 from launch_testing.util import KeepAliveProc
-from launch_testing_ros import WaitForTopics
 from lifecycle_msgs.msg import State
 from mujoco_ros2_control_msgs.srv import ResetWorld
 import pytest
 import rclpy
-from rosgraph_msgs.msg import Clock
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray, String
 
@@ -143,13 +141,16 @@ class TestSharedSimulation(unittest.TestCase):
             )
 
     def test_one_simulation_for_both_managers(self):
-        with WaitForTopics([("/clock", Clock)], timeout=10.0):
-            pass
+        # A node created in setUp has not discovered the graph yet, so a direct count can read 0.
+        def sim_nodes():
+            return [n for n, _ in self.node.get_node_names_and_namespaces() if n == "mujoco_ros2_control_node"]
+
+        self.assertTrue(
+            self.spin_until(lambda: self.node.count_publishers("/clock") >= 1 and sim_nodes(), timeout=10.0),
+            "No /clock publisher or simulation node discovered",
+        )
         self.assertEqual(self.node.count_publishers("/clock"), 1)
-        sim_nodes = [
-            name for name, _ in self.node.get_node_names_and_namespaces() if name == "mujoco_ros2_control_node"
-        ]
-        self.assertEqual(len(sim_nodes), 1, "Each component started its own simulation")
+        self.assertEqual(len(sim_nodes()), 1, "Each component started its own simulation")
 
     def test_each_manager_drives_only_its_own_joint(self):
         for device in JOINTS:
