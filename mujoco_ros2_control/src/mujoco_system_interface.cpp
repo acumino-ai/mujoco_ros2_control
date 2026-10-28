@@ -677,6 +677,12 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
     RCLCPP_FATAL(get_logger(), "Failed to register transmissions, exiting...");
     return hardware_interface::CallbackReturn::FAILURE;
   }
+  // Before any write to the scene: a duplicate claim would otherwise move the other component's
+  // joints to this one's start pose, and only then fail.
+  if (!claim_actuators())
+  {
+    return hardware_interface::CallbackReturn::FAILURE;
+  }
   // Physics has run since the owner started it, so this component's joints may have left the start
   // pose. Seed them from the stored start pose, not from where they are now.
   const auto own_entries = owned_state_entries(simulation_->model(), owned_actuator_ids_);
@@ -696,6 +702,7 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
   build_interface_handles();
 #endif
 
+  // Again, to stage the ctrl that set_initial_pose() wrote. The first claim staged the ctrl from before it.
   if (!claim_actuators())
   {
     return hardware_interface::CallbackReturn::FAILURE;

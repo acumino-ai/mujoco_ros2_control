@@ -711,6 +711,32 @@ TEST_F(MujocoSystemInterfaceTest, ConcurrentInitOnSharedSceneSucceeds)
   std::filesystem::remove(kTwoJointModelPath);
 }
 
+// A component that claims an actuator another one drives must fail without writing to it. It once
+// wrote its own start position and ctrl into the joint first, and the joint stayed there.
+TEST_F(MujocoSystemInterfaceTest, DuplicateClaimLeavesOwnersJointUntouched)
+{
+  interface_.reset();
+  write_two_joint_model();
+  mujoco_ros2_control::MujocoSystemInterface owner;
+  ASSERT_EQ(init_component(owner, with_joint(create_hardware_info(), "joint_a", "0.0")),
+            hardware_interface::CallbackReturn::SUCCESS);
+  mujoco_ros2_control::MujocoSystemInterface duplicate;
+  ASSERT_EQ(init_component(duplicate, with_joint(create_hardware_info(), "joint_a", "1.0")),
+            hardware_interface::CallbackReturn::FAILURE);
+
+  mjModel* model = nullptr;
+  mjData* data = nullptr;
+  owner.get_model(model);
+  owner.get_data(data);
+  ASSERT_NE(data, nullptr);
+  const int actuator_id = mj_name2id(model, mjOBJ_ACTUATOR, "joint_a");
+  EXPECT_EQ(data->ctrl[actuator_id], 0.0);
+  EXPECT_NEAR(data->qpos[model->jnt_qposadr[mj_name2id(model, mjOBJ_JOINT, "joint_a")]], 0.0, 1e-6);
+  mj_deleteData(data);
+  mj_deleteModel(model);
+  std::filesystem::remove(kTwoJointModelPath);
+}
+
 TEST(GetNoiseDistributionTest, DefaultsToGaussianWhenParamAbsent)
 {
   hardware_interface::ComponentInfo sensor;
