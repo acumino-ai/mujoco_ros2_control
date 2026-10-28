@@ -486,6 +486,9 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
       get_hardware_parameter_or(get_hardware_info(), "mujoco_model_topic", "/mujoco_robot_description");
   // LoadModel() reads the topic only when the file path is empty, so two topics are two scenes.
   const std::string scene_key = model_path.empty() ? "topic:" + mujoco_model_topic : "file:" + model_path;
+  // The owner locks this before it registers the scene. An attacher that ran first would read
+  // initial_qpos_ before capture_initial_state() fills it.
+  std::unique_lock<std::recursive_mutex> sim_lock;
   {
     // Held through initialize(): a second component must not attach to a half-built simulation.
     const std::lock_guard<std::mutex> lock(g_shared_simulations_mutex);
@@ -539,6 +542,7 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
       }
       // Held until load_mujoco_plugins() returns, so no other write() reads plugin_instances mid-load.
       shared->plugin_driver = this;
+      sim_lock = std::unique_lock<std::recursive_mutex>(shared->simulation->mutex());
       shared_ = shared;
       g_shared_simulations[scene_key] = shared_;
     }
@@ -587,7 +591,10 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
 
   // Physics may already be running for other components, so hold it while this one writes its
   // initial state into the scene.
-  std::unique_lock<std::recursive_mutex> sim_lock(simulation_->mutex());
+  if (!sim_lock)
+  {
+    sim_lock = std::unique_lock<std::recursive_mutex>(simulation_->mutex());
+  }
 
   // We explicitly check to make sure that all joints have names, otherwise stuff down the line won't work
   int num_joints_without_name = 0;
