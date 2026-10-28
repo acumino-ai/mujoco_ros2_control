@@ -132,9 +132,7 @@ class TestSharedSimulation(unittest.TestCase):
 
     def test_both_joints_start_at_the_keyframe(self):
         # Runs first (alphabetical order), before any test commands a joint.
-        self.assertTrue(
-            self.spin_until(lambda: all(joint in self.positions for joint in KEYFRAME)), "No joint states"
-        )
+        self.assertTrue(self.spin_until(lambda: all(joint in self.positions for joint in KEYFRAME)), "No joint states")
         for joint, start in KEYFRAME.items():
             self.assertAlmostEqual(
                 self.positions[joint], start, delta=TOLERANCE, msg=f"{joint} at {self.positions[joint]}"

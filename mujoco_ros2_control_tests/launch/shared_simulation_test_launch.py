@@ -59,17 +59,17 @@ def launch_setup(context, *args, **kwargs):
         # Each manager reads its description from its own namespace. Humble's manager listens on
         # ~/robot_description instead, so point this device's publisher there.
         publisher = Node(
-                package="robot_state_publisher",
-                executable="robot_state_publisher",
-                namespace=device,
-                output="both",
-                parameters=[robot_description, {"use_sim_time": True}],
-                remappings=(
-                    [("robot_description", "controller_manager/robot_description")]
-                    if os.environ.get("ROS_DISTRO") == "humble"
-                    else []
-                ),
-            )
+            package="robot_state_publisher",
+            executable="robot_state_publisher",
+            namespace=device,
+            output="both",
+            parameters=[robot_description, {"use_sim_time": True}],
+            remappings=(
+                [("robot_description", "controller_manager/robot_description")]
+                if os.environ.get("ROS_DISTRO") == "humble"
+                else []
+            ),
+        )
         # device_b attaches after physics has run long enough for its uncontrolled joint to fall, so
         # the tests see whether it seeds and stores its start pose from the keyframe or from the fall.
         nodes.append(publisher if device == DEVICES[0] else TimerAction(period=2.0, actions=[publisher]))

@@ -2726,8 +2726,9 @@ void MujocoSystemInterface::load_mujoco_plugins()
 {
   try
   {
-    shared_->plugin_loader = std::make_unique<pluginlib::ClassLoader<mujoco_ros2_control_plugins::MuJoCoROS2ControlPluginBase>>(
-        "mujoco_ros2_control_plugins", "mujoco_ros2_control_plugins::MuJoCoROS2ControlPluginBase");
+    shared_->plugin_loader =
+        std::make_unique<pluginlib::ClassLoader<mujoco_ros2_control_plugins::MuJoCoROS2ControlPluginBase>>(
+            "mujoco_ros2_control_plugins", "mujoco_ros2_control_plugins::MuJoCoROS2ControlPluginBase");
 
     // Get list of plugins from parameter (if specified)
     const std::string mujoco_plugins_param_prefix = "mujoco_plugins";
