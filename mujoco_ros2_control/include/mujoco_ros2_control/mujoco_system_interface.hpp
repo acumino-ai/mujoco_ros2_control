@@ -378,7 +378,12 @@ private:
 
   // Stages control_data with every other component's latest command in place of this component's
   // mirror of the sim, which lags them by up to a cycle and would undo their writes.
-  void stage_control_data(mjData* control_data);
+  void stage_control_data(mjData* control_data, const std::vector<ActuatorGains>& gains = {});
+
+  /**
+   * @brief Writes a position actuator's ctrl from its claimed interfaces, and queues gain changes.
+   */
+  void write_mit_command(MuJoCoActuatorData& actuator, mjData* control_data, std::vector<ActuatorGains>& gains);
 
   // MuJoCo actuator ids driven by this component's URDF joints.
   std::vector<int> owned_actuator_ids_;

@@ -1517,10 +1517,16 @@ hardware_interface::return_type MujocoSystemInterface::write(const rclcpp::Time&
   mju_copy(control_data->ctrl, control_state_.ctrl.data(), static_cast<int>(control_state_.ctrl.size()));
 
   // Update control data based on the latest readings
+  std::vector<ActuatorGains> gains;
   for (auto& actuator : mujoco_actuator_data_)
   {
     if (actuator.actuator_type == ActuatorType::PASSIVE)
     {
+      continue;
+    }
+    if (actuator.actuator_type == ActuatorType::POSITION)
+    {
+      write_mit_command(actuator, control_data, gains);
       continue;
     }
     if (actuator.is_position_control_enabled)
@@ -1558,7 +1564,7 @@ hardware_interface::return_type MujocoSystemInterface::write(const rclcpp::Time&
   }
 
   // Trigger to simulation to update its control inputs (this locks)
-  stage_control_data(control_data);
+  stage_control_data(control_data, gains);
 
   return hardware_interface::return_type::OK;
 }
@@ -1590,7 +1596,38 @@ bool MujocoSystemInterface::claim_actuators()
   return true;
 }
 
-void MujocoSystemInterface::stage_control_data(mjData* control_data)
+void MujocoSystemInterface::write_mit_command(MuJoCoActuatorData& actuator, mjData* control_data,
+                                              std::vector<ActuatorGains>& gains)
+{
+  // Nothing claimed: keep the last ctrl and gains, as the exclusive modes do. A released position
+  // controller therefore leaves the joint holding its last target.
+  if (!actuator.mit_position_claimed && !actuator.mit_velocity_claimed && !actuator.mit_effort_claimed)
+  {
+    return;
+  }
+  // The MIT law kp*(q_des - q) + kd*(v_des - v) + tau_ff, built from the actuator's affine bias so
+  // MuJoCo integrates kd implicitly (with implicit or implicitfast). The software PID path cannot be
+  // as stiff: on a UR5e under cartesian_compliance_controller a 10 cm step diverges with it and
+  // settles in 0.65 s this way. Without a claimed position kp is 0; without position or velocity kd is 0.
+  const auto finite_or = [](double value, double fallback) { return std::isfinite(value) ? value : fallback; };
+  const double kp = actuator.mit_position_claimed ? actuator.mit_kp : 0.0;
+  const double kd = (actuator.mit_position_claimed || actuator.mit_velocity_claimed) ? actuator.mit_kd : 0.0;
+  const double q_des = finite_or(actuator.position_interface.command_, control_state_.qpos[actuator.mj_pos_adr]);
+  const double v_des = actuator.mit_velocity_claimed ? finite_or(actuator.velocity_interface.command_, 0.0) : 0.0;
+  const double tau_ff = actuator.mit_effort_claimed ? finite_or(actuator.effort_interface.command_, 0.0) : 0.0;
+
+  if (kp != actuator.mit_staged_kp || kd != actuator.mit_staged_kd)
+  {
+    // gain 1 at kp = 0, so ctrl carries the torque instead of dividing by kp.
+    gains.push_back({ actuator.mj_actuator_id, kp > 0.0 ? kp : 1.0, -kp, -kd });
+    actuator.mit_staged_kp = kp;
+    actuator.mit_staged_kd = kd;
+  }
+  control_data->ctrl[actuator.mj_actuator_id] =
+      kp > 0.0 ? q_des + (kd * v_des + tau_ff) / kp : kd * v_des + tau_ff;
+}
+
+void MujocoSystemInterface::stage_control_data(mjData* control_data, const std::vector<ActuatorGains>& gains)
 {
   // Held through apply_control_data so two components cannot interleave their merges.
   const std::lock_guard<std::mutex> lock(shared_->control_mutex);
@@ -1619,7 +1656,7 @@ void MujocoSystemInterface::stage_control_data(mjData* control_data)
   {
     std::copy(shared_->qfrc.begin(), shared_->qfrc.end(), control_data->qfrc_applied);
   }
-  simulation_->apply_control_data(control_data);
+  simulation_->apply_control_data(control_data, gains);
 }
 
 template <typename Fn>
