@@ -52,6 +52,14 @@ if(BUILD_TESTING)
     hardware_interface::hardware_interface
   )
 
+  # Position actuators combine the claimed position, velocity and effort into the MIT law.
+  ament_add_ros_isolated_gtest(test_mit_position_actuator test/test_mit_position_actuator.cpp)
+  target_link_libraries(test_mit_position_actuator
+    ${mujoco_ros2_control_TARGETS}
+    rclcpp::rclcpp
+    hardware_interface::hardware_interface
+  )
+
   install(
     DIRECTORY launch config test_resources
     DESTINATION share/${PROJECT_NAME}
