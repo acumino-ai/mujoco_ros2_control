@@ -1394,9 +1394,10 @@ mjData* MujocoSimulation::acquire_data_snapshot()
   return snapshot_read_;
 }
 
-void MujocoSimulation::apply_control_data(mjData* control_data)
+void MujocoSimulation::apply_control_data(mjData* control_data, const std::vector<ActuatorGains>& gains)
 {
   const std::lock_guard<std::mutex> lock(control_staging_mutex_);
+  gains_staged_.insert(gains_staged_.end(), gains.begin(), gains.end());
   mju_copy(ctrl_staged_.data(), control_data->ctrl, static_cast<int>(mj_model_->nu));
   mju_copy(qfrc_applied_staged_.data(), control_data->qfrc_applied, static_cast<int>(mj_model_->nv));
   control_inputs_staged_ = true;
@@ -1443,6 +1444,13 @@ void MujocoSimulation::apply_staged_control_inputs()
 
   // Only apply ctrl / qfrc_applied once the hw interface has staged control inputs,
   // so that initial or reset values in mj_data_ are not overwritten with zeros.
+  for (const auto& g : gains_staged_)
+  {
+    mj_model_->actuator_gainprm[g.actuator_id * mjNGAIN] = g.gain;
+    mj_model_->actuator_biasprm[g.actuator_id * mjNBIAS + 1] = g.bias1;
+    mj_model_->actuator_biasprm[g.actuator_id * mjNBIAS + 2] = g.bias2;
+  }
+  gains_staged_.clear();
   if (control_inputs_staged_)
   {
     mju_copy(mj_data_->ctrl, ctrl_staged_.data(), static_cast<int>(mj_model_->nu));

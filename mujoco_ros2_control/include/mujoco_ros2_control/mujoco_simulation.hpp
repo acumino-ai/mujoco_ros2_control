@@ -54,6 +54,17 @@
 namespace mujoco_ros2_control
 {
 
+/**
+ * @brief Servo gains of one position actuator: force = gain * ctrl + bias1 * q + bias2 * qdot.
+ */
+struct ActuatorGains
+{
+  int actuator_id;
+  mjtNum gain;
+  mjtNum bias1;
+  mjtNum bias2;
+};
+
 namespace
 {
 
@@ -347,8 +358,13 @@ public:
    * are the only two fields staged here because both are "held" quantities that persist
    * correctly across a batch of steps. Anything else that requires direct access to simulation
    * data can access it through the `set_pre_step_callback` functions.
+   *
+   * @param gains Servo gains of position actuators to change before the same step that first
+   *              applies this ctrl. A gain change staged separately could meet a ctrl meant for the
+   *              other mode for one step: an effort ctrl read as a position target.
    */
-  void apply_control_data(mjData* control_data);
+  void apply_control_data(mjData* control_data, const std::vector<ActuatorGains>& gains = {});
+
 
   /**
    * @brief Accessor for the mutex which locks access to the data and model.
@@ -530,6 +546,8 @@ private:
   // Control inputs staged by apply_control_data, applied to mj_data_ before each step.
   std::vector<mjtNum> ctrl_staged_;
   std::vector<mjtNum> qfrc_applied_staged_;
+  // Gain changes staged with them, applied to mj_model_ by the physics thread only.
+  std::vector<ActuatorGains> gains_staged_;
 
   // False until apply_control_data is first called (and cleared on reset), so that initial /
   // reset ctrl values in mj_data_ are not clobbered by stale staging buffers.
