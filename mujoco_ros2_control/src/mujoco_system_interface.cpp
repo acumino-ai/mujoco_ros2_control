@@ -1731,6 +1731,33 @@ bool MujocoSystemInterface::register_mujoco_actuators()
     actuator_data.mj_vel_adr = simulation_->model()->jnt_dofadr[target_id];
     actuator_data.mj_joint_type = simulation_->model()->jnt_type[target_id];
     actuator_data.actuator_type = getActuatorType(simulation_->model(), actuator_data.mj_actuator_id);
+    if (actuator_data.actuator_type == ActuatorType::POSITION)
+    {
+      const auto* model = simulation_->model();
+      actuator_data.mit_kp = model->actuator_gainprm[i * mjNGAIN];
+      actuator_data.mit_kd = -model->actuator_biasprm[i * mjNBIAS + 2];
+      // A deployment's motor gains (the real arm's kp/kd file) override the model's.
+      for (const auto& joint : get_hardware_info().joints)
+      {
+        if (joint.name != actuator_data.joint_name)
+        {
+          continue;
+        }
+        if (joint.parameters.count("kp"))
+        {
+          actuator_data.mit_kp = std::stod(joint.parameters.at("kp"));
+        }
+        if (joint.parameters.count("kd"))
+        {
+          actuator_data.mit_kd = std::stod(joint.parameters.at("kd"));
+        }
+      }
+      if (actuator_data.mit_kp <= 0.0)
+      {
+        RCLCPP_ERROR(get_logger(), "Position actuator '%s' needs kp > 0, has %f", act_name, actuator_data.mit_kp);
+        return false;
+      }
+    }
 
     // Initialize PID controllers for actuators that have them configured
     const auto initialize_position_pids = [&]() -> bool {
