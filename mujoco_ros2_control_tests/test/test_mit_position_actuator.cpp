@@ -187,4 +187,18 @@ TEST_F(MitPositionActuator, FirstClaimEndsStartupHold)
   EXPECT_DOUBLE_EQ(staged.bias2, 0.0);
   EXPECT_DOUBLE_EQ(staged.ctrl, Rig::tau_ff);
 }
+
+// MuJoCo clamps ctrl, which carries the velocity and effort terms: a ctrlrange would cut them silently.
+// Position alone stays claimable, as its ctrl is q_des.
+TEST_F(MitPositionActuator, CtrlrangeRefusesVelocityAndEffortClaims)
+{
+  std::string model = kTestModel;
+  const std::string actuator = R"(kv="10")";
+  model.replace(model.find(actuator), actuator.size(), R"(kv="10" ctrlrange="-0.5 0.5")");
+  Rig rig(model);
+  ASSERT_EQ(rig.init_result, hardware_interface::CallbackReturn::SUCCESS);
+  EXPECT_EQ(rig.component.prepare_command_mode_switch({ "j/effort" }, {}), hardware_interface::return_type::ERROR);
+  EXPECT_EQ(rig.component.prepare_command_mode_switch({ "j/velocity" }, {}), hardware_interface::return_type::ERROR);
+  EXPECT_EQ(rig.component.prepare_command_mode_switch({ "j/position" }, {}), hardware_interface::return_type::OK);
+}
 #endif

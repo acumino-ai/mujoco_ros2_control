@@ -1177,6 +1177,41 @@ MujocoSystemInterface::on_deactivate(const rclcpp_lifecycle::State& /*previous_s
 }
 
 hardware_interface::return_type
+MujocoSystemInterface::prepare_command_mode_switch(const std::vector<std::string>& start_interfaces,
+                                                   const std::vector<std::string>& /*stop_interfaces*/)
+{
+  // MuJoCo clamps ctrl, and on a position actuator ctrl carries (kd*v_des + tau_ff)/kp, or the bare torque
+  // at kp = 0: a ctrlrange would silently cut velocity and effort commands. A position-only ctrl is q_des,
+  // so a ctrlrange is fine there, and a joint may export velocity or effort that nothing claims.
+  for (const auto& interface_name : start_interfaces)
+  {
+    const size_t delimiter_pos = interface_name.rfind('/');
+    if (delimiter_pos == std::string::npos ||
+        interface_name.substr(delimiter_pos + 1) == hardware_interface::HW_IF_POSITION)
+    {
+      continue;
+    }
+    const std::string joint_name = interface_name.substr(0, delimiter_pos);
+    for (const auto& actuator_name : get_joint_actuator_names(joint_name, get_hardware_info(), simulation_->model()))
+    {
+      for (const auto& actuator : mujoco_actuator_data_)
+      {
+        if (actuator.joint_name == actuator_name && actuator.actuator_type == ActuatorType::POSITION &&
+            simulation_->model()->actuator_ctrllimited[actuator.mj_actuator_id])
+        {
+          RCLCPP_ERROR(get_logger(),
+                       "Cannot claim %s: position actuator '%s' has a ctrlrange, which clamps velocity and effort "
+                       "commands. Remove it and limit torque with forcerange.",
+                       interface_name.c_str(), actuator_name.c_str());
+          return hardware_interface::return_type::ERROR;
+        }
+      }
+    }
+  }
+  return hardware_interface::return_type::OK;
+}
+
+hardware_interface::return_type
 MujocoSystemInterface::perform_command_mode_switch(const std::vector<std::string>& start_interfaces,
                                                    const std::vector<std::string>& stop_interfaces)
 {
