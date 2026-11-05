@@ -1244,6 +1244,7 @@ MujocoSystemInterface::perform_command_mode_switch(const std::vector<std::string
         exclusive.push_back(actuator_it);
         continue;
       }
+      actuator_it->mit_holding = actuator_it->mit_holding && !enabled;
       if (interface_type == hardware_interface::HW_IF_POSITION)
       {
         actuator_it->mit_position_claimed = enabled;
@@ -1601,7 +1602,8 @@ void MujocoSystemInterface::write_mit_command(MuJoCoActuatorData& actuator, mjDa
 {
   // Nothing claimed: keep the last ctrl and gains, as the exclusive modes do. A released position
   // controller therefore leaves the joint holding its last target.
-  if (!actuator.mit_position_claimed && !actuator.mit_velocity_claimed && !actuator.mit_effort_claimed)
+  const bool position = actuator.mit_position_claimed || actuator.mit_holding;
+  if (!position && !actuator.mit_velocity_claimed && !actuator.mit_effort_claimed)
   {
     return;
   }
@@ -1610,8 +1612,8 @@ void MujocoSystemInterface::write_mit_command(MuJoCoActuatorData& actuator, mjDa
   // as stiff: on a UR5e under cartesian_compliance_controller a 10 cm step diverges with it and
   // settles in 0.65 s this way. Without a claimed position kp is 0; without position or velocity kd is 0.
   const auto finite_or = [](double value, double fallback) { return std::isfinite(value) ? value : fallback; };
-  const double kp = actuator.mit_position_claimed ? actuator.mit_kp : 0.0;
-  const double kd = (actuator.mit_position_claimed || actuator.mit_velocity_claimed) ? actuator.mit_kd : 0.0;
+  const double kp = position ? actuator.mit_kp : 0.0;
+  const double kd = (position || actuator.mit_velocity_claimed) ? actuator.mit_kd : 0.0;
   const double q_des = finite_or(actuator.position_interface.command_, control_state_.qpos[actuator.mj_pos_adr]);
   const double v_des = actuator.mit_velocity_claimed ? finite_or(actuator.velocity_interface.command_, 0.0) : 0.0;
   const double tau_ff = actuator.mit_effort_claimed ? finite_or(actuator.effort_interface.command_, 0.0) : 0.0;
@@ -2100,7 +2102,7 @@ void MujocoSystemInterface::register_urdf_joints(const hardware_interface::Hardw
                         actuator_name.c_str(), actuator_it->mit_kp, actuator_it->mit_kd);
             // Direct position control enabled for position actuator; holds the start pose until claimed
             actuator_it->is_position_control_enabled = true;
-            actuator_it->mit_position_claimed = true;
+            actuator_it->mit_holding = true;
           }
           else if (actuator_it->actuator_type == ActuatorType::VELOCITY ||
                    actuator_it->actuator_type == ActuatorType::MOTOR ||
@@ -2758,7 +2760,8 @@ void MujocoSystemInterface::reset_simulation_state(bool /*fill_initial_state*/)
     {
       actuator.is_position_pid_control_enabled = actuator.has_pos_pid;
       actuator.is_position_control_enabled = !actuator.has_pos_pid && actuator.actuator_type == ActuatorType::POSITION;
-      actuator.mit_position_claimed = actuator.is_position_control_enabled;
+      actuator.mit_holding = actuator.is_position_control_enabled;
+      actuator.mit_position_claimed = false;
       actuator.mit_velocity_claimed = false;
       actuator.mit_effort_claimed = false;
       // Re-stage on the next write(): the model may still hold another mode's gains.

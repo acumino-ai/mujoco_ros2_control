@@ -174,4 +174,17 @@ TEST_F(MitPositionActuator, ClaimedInterfacesCombineIntoOneLaw)
   EXPECT_DOUBLE_EQ(staged.bias2, -kKd);
   EXPECT_DOUBLE_EQ(staged.ctrl, kKd * Rig::v_des);
 }
+
+// The start-up hold is not a position claim: the first claim on the joint ends it, so an effort
+// controller started from start-up gets a plain motor and not kp*(q_start - q) on top of its torque.
+TEST_F(MitPositionActuator, FirstClaimEndsStartupHold)
+{
+  Rig rig;
+  ASSERT_EQ(rig.init_result, hardware_interface::CallbackReturn::SUCCESS);
+  const Staged staged = rig.switch_and_write({ "j/effort" }, {});
+  EXPECT_DOUBLE_EQ(staged.gain, 1.0);
+  EXPECT_DOUBLE_EQ(staged.bias1, 0.0);
+  EXPECT_DOUBLE_EQ(staged.bias2, 0.0);
+  EXPECT_DOUBLE_EQ(staged.ctrl, Rig::tau_ff);
+}
 #endif

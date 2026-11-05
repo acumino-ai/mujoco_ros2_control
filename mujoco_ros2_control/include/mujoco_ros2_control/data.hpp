@@ -122,6 +122,9 @@ struct MuJoCoActuatorData
   bool mit_position_claimed{ false };
   bool mit_velocity_claimed{ false };
   bool mit_effort_claimed{ false };
+  // Holds the start pose with kp/kd until the first claim. Not a position claim: an effort-only
+  // controller would otherwise get kp*(q_start - q) on top of its torque.
+  bool mit_holding{ false };
   // Gains last staged to the model; NaN until the first write() stages them.
   double mit_staged_kp{ std::numeric_limits<double>::quiet_NaN() };
   double mit_staged_kd{ std::numeric_limits<double>::quiet_NaN() };
