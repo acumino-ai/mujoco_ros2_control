@@ -201,4 +201,16 @@ TEST_F(MitPositionActuator, CtrlrangeRefusesVelocityAndEffortClaims)
   EXPECT_EQ(rig.component.prepare_command_mode_switch({ "j/velocity" }, {}), hardware_interface::return_type::ERROR);
   EXPECT_EQ(rig.component.prepare_command_mode_switch({ "j/position" }, {}), hardware_interface::return_type::OK);
 }
+
+// Position is optional: a joint that exports only effort initializes and drives as a plain motor.
+TEST_F(MitPositionActuator, EffortOnlyJointDrivesAsMotor)
+{
+  Rig rig(kTestModel, { "effort" });
+  ASSERT_EQ(rig.init_result, hardware_interface::CallbackReturn::SUCCESS);
+  const Staged staged = rig.switch_and_write({ "j/effort" }, {});
+  EXPECT_DOUBLE_EQ(staged.gain, 1.0);
+  EXPECT_DOUBLE_EQ(staged.bias1, 0.0);
+  EXPECT_DOUBLE_EQ(staged.bias2, 0.0);
+  EXPECT_DOUBLE_EQ(staged.ctrl, Rig::tau_ff);
+}
 #endif

@@ -2125,6 +2125,13 @@ void MujocoSystemInterface::register_urdf_joints(const hardware_interface::Hardw
       for (auto* actuator_it : joint_actuators)
       {
         const std::string actuator_name = mj_id2name(simulation_->model(), mjOBJ_ACTUATOR, actuator_it->mj_actuator_id);
+        // A position actuator holds the start pose until the first claim, whichever interfaces the joint exports:
+        // without the hold an effort-only joint would servo to ctrl = 0.
+        if (actuator_it->actuator_type == ActuatorType::POSITION)
+        {
+          actuator_it->is_position_control_enabled = true;
+          actuator_it->mit_holding = true;
+        }
         // If available, always default to position control at the start
         if (command_if == hardware_interface::HW_IF_POSITION)
         {
@@ -2135,9 +2142,6 @@ void MujocoSystemInterface::register_urdf_joints(const hardware_interface::Hardw
           {
             RCLCPP_INFO(get_logger(), "Using MuJoCo position actuator for the joint : '%s' (kp=%f, kd=%f)",
                         actuator_name.c_str(), actuator_it->mit_kp, actuator_it->mit_kd);
-            // Direct position control enabled for position actuator; holds the start pose until claimed
-            actuator_it->is_position_control_enabled = true;
-            actuator_it->mit_holding = true;
           }
           else if (actuator_it->actuator_type == ActuatorType::VELOCITY ||
                    actuator_it->actuator_type == ActuatorType::MOTOR ||
@@ -2170,7 +2174,7 @@ void MujocoSystemInterface::register_urdf_joints(const hardware_interface::Hardw
         {
           // Velocity command interface:
           // Direct control for velocity actuators; velocity PID required for motor or custom actuators.
-          // Position actuators take velocity as the MIT law's v_des, see write().
+          // Position actuators take velocity as the MIT law's v_des, with or without position, see write().
           if (actuator_it->actuator_type == ActuatorType::VELOCITY)
           {
             RCLCPP_INFO(get_logger(), "Using MuJoCo velocity actuator for the joint : '%s'", actuator_name.c_str());
@@ -2206,8 +2210,8 @@ void MujocoSystemInterface::register_urdf_joints(const hardware_interface::Hardw
                  command_if == hardware_interface::HW_IF_FORCE)
         {
           // Effort command interface:
-          // Direct control for effort actuators; position actuators take it as the MIT law's tau_ff, see
-          // write(). Not supported for velocity actuators.
+          // Direct control for effort actuators; position actuators take it as the MIT law's tau_ff, with or
+          // without position, see write(). Not supported for velocity actuators.
           RCLCPP_ERROR_EXPRESSION(
               get_logger(), actuator_it->actuator_type == ActuatorType::VELOCITY,
               "Effort command interface for the joint : %s is not supported with velocity actuator. Skipping it.",
