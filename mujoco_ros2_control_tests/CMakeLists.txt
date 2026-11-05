@@ -56,6 +56,7 @@ if(BUILD_TESTING)
   ament_add_ros_isolated_gtest(test_mit_position_actuator test/test_mit_position_actuator.cpp)
   target_link_libraries(test_mit_position_actuator
     ${mujoco_ros2_control_TARGETS}
+    ${mujoco_ros2_control_msgs_TARGETS}
     rclcpp::rclcpp
     hardware_interface::hardware_interface
   )

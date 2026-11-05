@@ -2799,10 +2799,9 @@ void MujocoSystemInterface::reset_simulation_state(bool /*fill_initial_state*/)
     {
       actuator.is_position_pid_control_enabled = actuator.has_pos_pid;
       actuator.is_position_control_enabled = !actuator.has_pos_pid && actuator.actuator_type == ActuatorType::POSITION;
-      actuator.mit_holding = actuator.is_position_control_enabled;
-      actuator.mit_position_claimed = false;
-      actuator.mit_velocity_claimed = false;
-      actuator.mit_effort_claimed = false;
+      // The claims stay: the controllers that made them stay active, and no switch follows a reset.
+      actuator.mit_holding = actuator.is_position_control_enabled && !actuator.mit_position_claimed &&
+                             !actuator.mit_velocity_claimed && !actuator.mit_effort_claimed;
       // Re-stage on the next write(): the model may still hold another mode's gains.
       actuator.mit_staged_kp = std::numeric_limits<double>::quiet_NaN();
       actuator.mit_staged_kd = std::numeric_limits<double>::quiet_NaN();

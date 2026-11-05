@@ -33,6 +33,7 @@
 #include <rclcpp/rclcpp.hpp>
 
 #include <mujoco_ros2_control/mujoco_system_interface.hpp>
+#include <mujoco_ros2_control_msgs/srv/reset_world.hpp>
 
 #define ROS_DISTRO_HUMBLE (HARDWARE_INTERFACE_VERSION_MAJOR < 3)
 
@@ -131,6 +132,25 @@ struct Rig
 
   ~Rig() { std::filesystem::remove(kTestModelPath); }
 
+  // Calls the reset_world service, then writes again with no mode switch, as after a real reset.
+  Staged reset_world_and_write()
+  {
+    const auto node = std::make_shared<rclcpp::Node>("mit_reset_client");
+    const auto client =
+        node->create_client<mujoco_ros2_control_msgs::srv::ResetWorld>("/mujoco_ros2_control_node/reset_world");
+    EXPECT_TRUE(client->wait_for_service(std::chrono::seconds(5)));
+    auto future = client->async_send_request(std::make_shared<mujoco_ros2_control_msgs::srv::ResetWorld::Request>());
+    EXPECT_EQ(rclcpp::spin_until_future_complete(node, future, std::chrono::seconds(5)),
+              rclcpp::FutureReturnCode::SUCCESS);
+    EXPECT_TRUE(future.get()->success);
+    // The reset set the commands to the reset state; the active controllers write theirs again.
+    EXPECT_TRUE(commands.at("position")->set_value(q_des));
+    EXPECT_TRUE(commands.at("velocity")->set_value(v_des));
+    EXPECT_TRUE(commands.at("effort")->set_value(tau_ff));
+    EXPECT_EQ(component.write(rclcpp::Time(0), period), hardware_interface::return_type::OK);
+    return applied(component);
+  }
+
   Staged switch_and_write(const std::vector<std::string>& start, const std::vector<std::string>& stop)
   {
     EXPECT_EQ(component.perform_command_mode_switch(start, stop), hardware_interface::return_type::OK);
@@ -208,6 +228,27 @@ TEST_F(MitPositionActuator, EffortOnlyJointDrivesAsMotor)
   Rig rig(kTestModel, { "effort" });
   ASSERT_EQ(rig.init_result, hardware_interface::CallbackReturn::SUCCESS);
   const Staged staged = rig.switch_and_write({ "j/effort" }, {});
+  EXPECT_DOUBLE_EQ(staged.gain, 1.0);
+  EXPECT_DOUBLE_EQ(staged.bias1, 0.0);
+  EXPECT_DOUBLE_EQ(staged.bias2, 0.0);
+  EXPECT_DOUBLE_EQ(staged.ctrl, Rig::tau_ff);
+}
+
+// A reset keeps the claims: the controllers that made them stay active, and no mode switch follows.
+TEST_F(MitPositionActuator, ResetWorldKeepsClaims)
+{
+  Rig rig;
+  ASSERT_EQ(rig.init_result, hardware_interface::CallbackReturn::SUCCESS);
+  rig.switch_and_write({ "j/position", "j/velocity", "j/effort" }, {});
+  Staged staged = rig.reset_world_and_write();
+  EXPECT_DOUBLE_EQ(staged.gain, kKp);
+  EXPECT_DOUBLE_EQ(staged.bias1, -kKp);
+  EXPECT_DOUBLE_EQ(staged.bias2, -kKd);
+  EXPECT_DOUBLE_EQ(staged.ctrl, Rig::q_des + (kKd * Rig::v_des + Rig::tau_ff) / kKp);
+
+  // Effort alone gets no start-pose hold back from the reset.
+  rig.switch_and_write({}, { "j/position", "j/velocity" });
+  staged = rig.reset_world_and_write();
   EXPECT_DOUBLE_EQ(staged.gain, 1.0);
   EXPECT_DOUBLE_EQ(staged.bias1, 0.0);
   EXPECT_DOUBLE_EQ(staged.bias2, 0.0);
