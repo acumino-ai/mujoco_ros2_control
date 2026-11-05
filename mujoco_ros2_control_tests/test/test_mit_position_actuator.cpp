@@ -26,6 +26,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <hardware_interface/hardware_info.hpp>
 #include <hardware_interface/version.h>
@@ -79,18 +80,26 @@ Staged applied(mujoco_ros2_control::MujocoSystemInterface& component)
   return staged;
 }
 
-}  // namespace
-
-TEST(MitPositionActuator, ClaimedInterfacesCombineIntoOneLaw)
+// One joint with the given command interfaces (all three by default), fresh from on_init, commands set to
+// the values below.
+struct Rig
 {
-  rclcpp::init(0, nullptr);
-  {
-    std::ofstream(kTestModelPath) << kTestModel;
+  static constexpr double q_des = 0.3;
+  static constexpr double v_des = 0.2;
+  static constexpr double tau_ff = 1.5;
+  const rclcpp::Duration period{ 0, 2000000 };
+  mujoco_ros2_control::MujocoSystemInterface component;
+  std::map<std::string, hardware_interface::CommandInterface::SharedPtr> commands;
+  hardware_interface::CallbackReturn init_result;
 
+  explicit Rig(const std::string& model = kTestModel,
+               const std::vector<std::string>& interfaces = { "position", "velocity", "effort" })
+  {
+    std::ofstream(kTestModelPath) << model;
     hardware_interface::ComponentInfo joint;
     joint.name = "j";
     joint.type = "joint";
-    for (const char* name : { "position", "velocity", "effort" })
+    for (const auto& name : interfaces)
     {
       joint.command_interfaces.push_back(hardware_interface::InterfaceInfo{ .name = name });
       joint.state_interfaces.push_back(hardware_interface::InterfaceInfo{ .name = name });
@@ -104,52 +113,65 @@ TEST(MitPositionActuator, ClaimedInterfacesCombineIntoOneLaw)
     hardware_interface::HardwareComponentInterfaceParams params;
     params.hardware_info = info;
 
-    mujoco_ros2_control::MujocoSystemInterface component;
-    ASSERT_EQ(component.on_init(params), hardware_interface::CallbackReturn::SUCCESS);
-    std::map<std::string, hardware_interface::CommandInterface::SharedPtr> commands;
+    init_result = component.on_init(params);
+    if (init_result != hardware_interface::CallbackReturn::SUCCESS)
+    {
+      return;
+    }
     for (const auto& command : component.on_export_command_interfaces())
     {
       commands[command->get_interface_name()] = command;
     }
-    const double q_des = 0.3;
-    const double v_des = 0.2;
-    const double tau_ff = 1.5;
-    ASSERT_TRUE(commands.at("position")->set_value(q_des));
-    ASSERT_TRUE(commands.at("velocity")->set_value(v_des));
-    ASSERT_TRUE(commands.at("effort")->set_value(tau_ff));
-    const rclcpp::Duration period(0, 2000000);
-
-    // All three, as hybrid_compliance_controller claims them: the full law.
-    ASSERT_EQ(component.perform_command_mode_switch({ "j/position", "j/velocity", "j/effort" }, {}),
-              hardware_interface::return_type::OK);
-    ASSERT_EQ(component.write(rclcpp::Time(0), period), hardware_interface::return_type::OK);
-    Staged staged = applied(component);
-    EXPECT_DOUBLE_EQ(staged.gain, kKp);
-    EXPECT_DOUBLE_EQ(staged.bias1, -kKp);
-    EXPECT_DOUBLE_EQ(staged.bias2, -kKd);
-    EXPECT_DOUBLE_EQ(staged.ctrl, q_des + (kKd * v_des + tau_ff) / kKp);
-
-    // Effort alone, as forward_effort_controller claims it: a plain motor.
-    ASSERT_EQ(component.perform_command_mode_switch({}, { "j/position", "j/velocity" }),
-              hardware_interface::return_type::OK);
-    ASSERT_EQ(component.write(rclcpp::Time(0), period), hardware_interface::return_type::OK);
-    staged = applied(component);
-    EXPECT_DOUBLE_EQ(staged.gain, 1.0);
-    EXPECT_DOUBLE_EQ(staged.bias1, 0.0);
-    EXPECT_DOUBLE_EQ(staged.bias2, 0.0);
-    EXPECT_DOUBLE_EQ(staged.ctrl, tau_ff);
-
-    // Velocity alone: kd servos the velocity.
-    ASSERT_EQ(component.perform_command_mode_switch({ "j/velocity" }, { "j/effort" }),
-              hardware_interface::return_type::OK);
-    ASSERT_EQ(component.write(rclcpp::Time(0), period), hardware_interface::return_type::OK);
-    staged = applied(component);
-    EXPECT_DOUBLE_EQ(staged.gain, 1.0);
-    EXPECT_DOUBLE_EQ(staged.bias1, 0.0);
-    EXPECT_DOUBLE_EQ(staged.bias2, -kKd);
-    EXPECT_DOUBLE_EQ(staged.ctrl, kKd * v_des);
+    const std::map<std::string, double> values{ { "position", q_des }, { "velocity", v_des }, { "effort", tau_ff } };
+    for (const auto& [name, command] : commands)
+    {
+      EXPECT_TRUE(command->set_value(values.at(name)));
+    }
   }
-  std::filesystem::remove(kTestModelPath);
-  rclcpp::shutdown();
+
+  ~Rig() { std::filesystem::remove(kTestModelPath); }
+
+  Staged switch_and_write(const std::vector<std::string>& start, const std::vector<std::string>& stop)
+  {
+    EXPECT_EQ(component.perform_command_mode_switch(start, stop), hardware_interface::return_type::OK);
+    EXPECT_EQ(component.write(rclcpp::Time(0), period), hardware_interface::return_type::OK);
+    return applied(component);
+  }
+};
+
+}  // namespace
+
+class MitPositionActuator : public ::testing::Test
+{
+protected:
+  static void SetUpTestSuite() { rclcpp::init(0, nullptr); }
+  static void TearDownTestSuite() { rclcpp::shutdown(); }
+};
+
+TEST_F(MitPositionActuator, ClaimedInterfacesCombineIntoOneLaw)
+{
+  Rig rig;
+  ASSERT_EQ(rig.init_result, hardware_interface::CallbackReturn::SUCCESS);
+
+  // All three, as hybrid_compliance_controller claims them: the full law.
+  Staged staged = rig.switch_and_write({ "j/position", "j/velocity", "j/effort" }, {});
+  EXPECT_DOUBLE_EQ(staged.gain, kKp);
+  EXPECT_DOUBLE_EQ(staged.bias1, -kKp);
+  EXPECT_DOUBLE_EQ(staged.bias2, -kKd);
+  EXPECT_DOUBLE_EQ(staged.ctrl, Rig::q_des + (kKd * Rig::v_des + Rig::tau_ff) / kKp);
+
+  // Effort alone, as forward_effort_controller claims it: a plain motor.
+  staged = rig.switch_and_write({}, { "j/position", "j/velocity" });
+  EXPECT_DOUBLE_EQ(staged.gain, 1.0);
+  EXPECT_DOUBLE_EQ(staged.bias1, 0.0);
+  EXPECT_DOUBLE_EQ(staged.bias2, 0.0);
+  EXPECT_DOUBLE_EQ(staged.ctrl, Rig::tau_ff);
+
+  // Velocity alone: kd servos the velocity.
+  staged = rig.switch_and_write({ "j/velocity" }, { "j/effort" });
+  EXPECT_DOUBLE_EQ(staged.gain, 1.0);
+  EXPECT_DOUBLE_EQ(staged.bias1, 0.0);
+  EXPECT_DOUBLE_EQ(staged.bias2, -kKd);
+  EXPECT_DOUBLE_EQ(staged.ctrl, kKd * Rig::v_des);
 }
 #endif
