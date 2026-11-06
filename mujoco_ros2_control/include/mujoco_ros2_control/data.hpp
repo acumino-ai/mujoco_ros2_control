@@ -114,6 +114,24 @@ struct MuJoCoActuatorData
   bool has_pos_pid{ false };
   bool has_vel_pid{ false };
 
+  // A POSITION actuator runs the MIT law kp*(q_des - q) + kd*(v_des - v) + tau_ff on whichever of
+  // position, velocity and effort are claimed together, so these replace the exclusive flags above.
+  // kp and kd come from the MJCF (gain, -bias2), or from the joint's kp/kd parameters.
+  double mit_kp{ 0.0 };
+  double mit_kd{ 0.0 };
+  bool mit_position_claimed{ false };
+  bool mit_velocity_claimed{ false };
+  bool mit_effort_claimed{ false };
+  // Holds the start pose with kp/kd until the first claim. Not a position claim: an effort-only
+  // controller would otherwise get kp*(q_start - q) on top of its torque.
+  bool mit_holding{ false };
+  // The q_des when no position command is finite: the scene's start pose, then the reset pose. A joint
+  // that exports no position interface has no command to hold, and following qpos would not hold at all.
+  double mit_hold_target{ std::numeric_limits<double>::quiet_NaN() };
+  // Gains last staged to the model; NaN until the first write() stages them.
+  double mit_staged_kp{ std::numeric_limits<double>::quiet_NaN() };
+  double mit_staged_kd{ std::numeric_limits<double>::quiet_NaN() };
+
   void copy_state_to_transmission()
   {
     position_interface.transmission_passthrough_ = position_interface.state_;

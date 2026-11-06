@@ -24,6 +24,7 @@
 #include <fmt/ranges.h>
 
 #include <algorithm>
+#include <iterator>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -1177,6 +1178,41 @@ MujocoSystemInterface::on_deactivate(const rclcpp_lifecycle::State& /*previous_s
 }
 
 hardware_interface::return_type
+MujocoSystemInterface::prepare_command_mode_switch(const std::vector<std::string>& start_interfaces,
+                                                   const std::vector<std::string>& /*stop_interfaces*/)
+{
+  // MuJoCo clamps ctrl, and on a position actuator ctrl carries (kd*v_des + tau_ff)/kp, or the bare torque
+  // at kp = 0: a ctrlrange would silently cut velocity and effort commands. A position-only ctrl is q_des,
+  // so a ctrlrange is fine there, and a joint may export velocity or effort that nothing claims.
+  for (const auto& interface_name : start_interfaces)
+  {
+    const size_t delimiter_pos = interface_name.rfind('/');
+    if (delimiter_pos == std::string::npos ||
+        interface_name.substr(delimiter_pos + 1) == hardware_interface::HW_IF_POSITION)
+    {
+      continue;
+    }
+    const std::string joint_name = interface_name.substr(0, delimiter_pos);
+    for (const auto& actuator_name : get_joint_actuator_names(joint_name, get_hardware_info(), simulation_->model()))
+    {
+      for (const auto& actuator : mujoco_actuator_data_)
+      {
+        if (actuator.joint_name == actuator_name && actuator.actuator_type == ActuatorType::POSITION &&
+            simulation_->model()->actuator_ctrllimited[actuator.mj_actuator_id])
+        {
+          RCLCPP_ERROR(get_logger(),
+                       "Cannot claim %s: position actuator '%s' has a ctrlrange, which clamps velocity and effort "
+                       "commands. Remove it and limit torque with forcerange.",
+                       interface_name.c_str(), actuator_name.c_str());
+          return hardware_interface::return_type::ERROR;
+        }
+      }
+    }
+  }
+  return hardware_interface::return_type::OK;
+}
+
+hardware_interface::return_type
 MujocoSystemInterface::perform_command_mode_switch(const std::vector<std::string>& start_interfaces,
                                                    const std::vector<std::string>& stop_interfaces)
 {
@@ -1229,6 +1265,43 @@ MujocoSystemInterface::perform_command_mode_switch(const std::vector<std::string
       RCLCPP_WARN(get_logger(), "No controllable MuJoCo actuator found for joint %s", joint_name.c_str());
       return;
     }
+
+    // Position actuators run position, velocity and effort together (the MIT law, see write()), so a
+    // claim adds to the others instead of replacing them. Clearing them here would leave a hybrid
+    // controller that claims all three with only the last one it started.
+    const bool is_effort = interface_type == hardware_interface::HW_IF_EFFORT ||
+                           interface_type == hardware_interface::HW_IF_TORQUE ||
+                           interface_type == hardware_interface::HW_IF_FORCE;
+    std::vector<MuJoCoActuatorData*> exclusive;
+    for (auto* actuator_it : actuators)
+    {
+      if (actuator_it->actuator_type != ActuatorType::POSITION)
+      {
+        exclusive.push_back(actuator_it);
+        continue;
+      }
+      actuator_it->mit_holding = actuator_it->mit_holding && !enabled;
+      if (interface_type == hardware_interface::HW_IF_POSITION)
+      {
+        actuator_it->mit_position_claimed = enabled;
+      }
+      else if (interface_type == hardware_interface::HW_IF_VELOCITY)
+      {
+        actuator_it->mit_velocity_claimed = enabled;
+      }
+      else if (is_effort)
+      {
+        actuator_it->mit_effort_claimed = enabled;
+      }
+      RCLCPP_INFO(get_logger(), "Joint %s: %s %s (position %d, velocity %d, effort %d)", joint_name.c_str(),
+                  interface_type.c_str(), enabled ? "claimed" : "released", actuator_it->mit_position_claimed,
+                  actuator_it->mit_velocity_claimed, actuator_it->mit_effort_claimed);
+    }
+    if (exclusive.empty())
+    {
+      return;
+    }
+    actuators = exclusive;
 
     // Only one type of control mode can be active at a time. Reset the flags on every actuator
     // the joint drives before (re-)enabling the requested one.
@@ -1481,10 +1554,16 @@ hardware_interface::return_type MujocoSystemInterface::write(const rclcpp::Time&
   mju_copy(control_data->ctrl, control_state_.ctrl.data(), static_cast<int>(control_state_.ctrl.size()));
 
   // Update control data based on the latest readings
+  std::vector<ActuatorGains> gains;
   for (auto& actuator : mujoco_actuator_data_)
   {
     if (actuator.actuator_type == ActuatorType::PASSIVE)
     {
+      continue;
+    }
+    if (actuator.actuator_type == ActuatorType::POSITION)
+    {
+      write_mit_command(actuator, control_data, gains);
       continue;
     }
     if (actuator.is_position_control_enabled)
@@ -1522,7 +1601,7 @@ hardware_interface::return_type MujocoSystemInterface::write(const rclcpp::Time&
   }
 
   // Trigger to simulation to update its control inputs (this locks)
-  stage_control_data(control_data);
+  stage_control_data(control_data, gains);
 
   return hardware_interface::return_type::OK;
 }
@@ -1554,7 +1633,39 @@ bool MujocoSystemInterface::claim_actuators()
   return true;
 }
 
-void MujocoSystemInterface::stage_control_data(mjData* control_data)
+void MujocoSystemInterface::write_mit_command(MuJoCoActuatorData& actuator, mjData* control_data,
+                                              std::vector<ActuatorGains>& gains)
+{
+  // Nothing claimed: keep the last ctrl and gains, as the exclusive modes do. A released position
+  // controller therefore leaves the joint holding its last target.
+  const bool position = actuator.mit_position_claimed || actuator.mit_holding;
+  if (!position && !actuator.mit_velocity_claimed && !actuator.mit_effort_claimed)
+  {
+    return;
+  }
+  // The MIT law kp*(q_des - q) + kd*(v_des - v) + tau_ff, built from the actuator's affine bias so
+  // MuJoCo integrates kd implicitly (with implicit or implicitfast). The software PID path cannot be
+  // as stiff: on a UR5e under cartesian_compliance_controller a 10 cm step diverges with it and
+  // settles in 0.65 s this way. Without a claimed position kp is 0; without position or velocity kd is 0.
+  const auto finite_or = [](double value, double fallback) { return std::isfinite(value) ? value : fallback; };
+  const double kp = position ? actuator.mit_kp : 0.0;
+  const double kd = (position || actuator.mit_velocity_claimed) ? actuator.mit_kd : 0.0;
+  const double q_des = finite_or(actuator.position_interface.command_, actuator.mit_hold_target);
+  const double v_des = actuator.mit_velocity_claimed ? finite_or(actuator.velocity_interface.command_, 0.0) : 0.0;
+  const double tau_ff = actuator.mit_effort_claimed ? finite_or(actuator.effort_interface.command_, 0.0) : 0.0;
+
+  if (kp != actuator.mit_staged_kp || kd != actuator.mit_staged_kd)
+  {
+    // gain 1 at kp = 0, so ctrl carries the torque instead of dividing by kp.
+    gains.push_back({ actuator.mj_actuator_id, kp > 0.0 ? kp : 1.0, -kp, -kd });
+    actuator.mit_staged_kp = kp;
+    actuator.mit_staged_kd = kd;
+  }
+  control_data->ctrl[actuator.mj_actuator_id] =
+      kp > 0.0 ? q_des + (kd * v_des + tau_ff) / kp : kd * v_des + tau_ff;
+}
+
+void MujocoSystemInterface::stage_control_data(mjData* control_data, const std::vector<ActuatorGains>& gains)
 {
   // Held through apply_control_data so two components cannot interleave their merges.
   const std::lock_guard<std::mutex> lock(shared_->control_mutex);
@@ -1583,7 +1694,13 @@ void MujocoSystemInterface::stage_control_data(mjData* control_data)
   {
     std::copy(shared_->qfrc.begin(), shared_->qfrc.end(), control_data->qfrc_applied);
   }
-  simulation_->apply_control_data(control_data);
+  // Gains follow the ctrl rule. After a reset every component holds the position actuators it does not
+  // own, and its hold gains would replace the owner's effort or velocity law for good: the owner's
+  // cached gains match, so it never stages again.
+  std::vector<ActuatorGains> owned;
+  std::copy_if(gains.begin(), gains.end(), std::back_inserter(owned),
+               [&](const ActuatorGains& g) { return writer(shared_->ctrl_owner[g.actuator_id]) == this; });
+  simulation_->apply_control_data(control_data, owned);
 }
 
 template <typename Fn>
@@ -1731,6 +1848,33 @@ bool MujocoSystemInterface::register_mujoco_actuators()
     actuator_data.mj_vel_adr = simulation_->model()->jnt_dofadr[target_id];
     actuator_data.mj_joint_type = simulation_->model()->jnt_type[target_id];
     actuator_data.actuator_type = getActuatorType(simulation_->model(), actuator_data.mj_actuator_id);
+    if (actuator_data.actuator_type == ActuatorType::POSITION)
+    {
+      const auto* model = simulation_->model();
+      actuator_data.mit_kp = model->actuator_gainprm[i * mjNGAIN];
+      actuator_data.mit_kd = -model->actuator_biasprm[i * mjNBIAS + 2];
+      // A deployment's motor gains (the real arm's kp/kd file) override the model's.
+      for (const auto& joint : get_hardware_info().joints)
+      {
+        if (joint.name != actuator_data.joint_name)
+        {
+          continue;
+        }
+        if (joint.parameters.count("kp"))
+        {
+          actuator_data.mit_kp = std::stod(joint.parameters.at("kp"));
+        }
+        if (joint.parameters.count("kd"))
+        {
+          actuator_data.mit_kd = std::stod(joint.parameters.at("kd"));
+        }
+      }
+      if (actuator_data.mit_kp <= 0.0)
+      {
+        RCLCPP_ERROR(get_logger(), "Position actuator '%s' needs kp > 0, has %f", act_name, actuator_data.mit_kp);
+        return false;
+      }
+    }
 
     // Initialize PID controllers for actuators that have them configured
     const auto initialize_position_pids = [&]() -> bool {
@@ -1816,6 +1960,27 @@ bool MujocoSystemInterface::register_mujoco_actuators()
     for (auto& actuator_data : mujoco_actuator_data_)
     {
       seed_from_scene(actuator_data, simulation_->data());
+    }
+  }
+
+  // Gains match by MuJoCo joint name only. Through a transmission they would need its conversion (kp/r^2 for a
+  // reducer, none for a differential), so refuse them rather than run the MJCF gains unannounced.
+  for (const auto& joint : get_hardware_info().joints)
+  {
+    if (!joint.parameters.count("kp") && !joint.parameters.count("kd"))
+    {
+      continue;
+    }
+    const bool taken = std::any_of(mujoco_actuator_data_.begin(), mujoco_actuator_data_.end(), [&](const auto& a) {
+      return a.actuator_type == ActuatorType::POSITION && a.joint_name == joint.name;
+    });
+    if (!taken)
+    {
+      RCLCPP_ERROR(get_logger(),
+                   "Joint '%s' sets kp/kd, but no <position> actuator drives a MuJoCo joint of that name. Gains "
+                   "through a transmission are not supported: set them in the MJCF.",
+                   joint.name.c_str());
+      return false;
     }
   }
   return true;
@@ -1988,6 +2153,13 @@ void MujocoSystemInterface::register_urdf_joints(const hardware_interface::Hardw
       for (auto* actuator_it : joint_actuators)
       {
         const std::string actuator_name = mj_id2name(simulation_->model(), mjOBJ_ACTUATOR, actuator_it->mj_actuator_id);
+        // A position actuator holds the start pose until the first claim, whichever interfaces the joint exports:
+        // without the hold an effort-only joint would servo to ctrl = 0.
+        if (actuator_it->actuator_type == ActuatorType::POSITION)
+        {
+          actuator_it->is_position_control_enabled = true;
+          actuator_it->mit_holding = true;
+        }
         // If available, always default to position control at the start
         if (command_if == hardware_interface::HW_IF_POSITION)
         {
@@ -1996,9 +2168,8 @@ void MujocoSystemInterface::register_urdf_joints(const hardware_interface::Hardw
 
           if (actuator_it->actuator_type == ActuatorType::POSITION)
           {
-            RCLCPP_INFO(get_logger(), "Using MuJoCo position actuator for the joint : '%s'", actuator_name.c_str());
-            // Direct position control enabled for position actuator
-            actuator_it->is_position_control_enabled = true;
+            RCLCPP_INFO(get_logger(), "Using MuJoCo position actuator for the joint : '%s' (kp=%f, kd=%f)",
+                        actuator_name.c_str(), actuator_it->mit_kp, actuator_it->mit_kd);
           }
           else if (actuator_it->actuator_type == ActuatorType::VELOCITY ||
                    actuator_it->actuator_type == ActuatorType::MOTOR ||
@@ -2031,10 +2202,7 @@ void MujocoSystemInterface::register_urdf_joints(const hardware_interface::Hardw
         {
           // Velocity command interface:
           // Direct control for velocity actuators; velocity PID required for motor or custom actuators.
-          RCLCPP_ERROR_EXPRESSION(
-              get_logger(), actuator_it->actuator_type == ActuatorType::POSITION,
-              "Velocity command interface for the joint : %s is not supported with position actuator",
-              actuator_name.c_str());
+          // Position actuators take velocity as the MIT law's v_des, with or without position, see write().
           if (actuator_it->actuator_type == ActuatorType::VELOCITY)
           {
             RCLCPP_INFO(get_logger(), "Using MuJoCo velocity actuator for the joint : '%s'", actuator_name.c_str());
@@ -2070,13 +2238,11 @@ void MujocoSystemInterface::register_urdf_joints(const hardware_interface::Hardw
                  command_if == hardware_interface::HW_IF_FORCE)
         {
           // Effort command interface:
-          // Direct control for effort actuators; not supported for position or velocity actuators.
+          // Direct control for effort actuators; position actuators take it as the MIT law's tau_ff, with or
+          // without position, see write(). Not supported for velocity actuators.
           RCLCPP_ERROR_EXPRESSION(
-              get_logger(),
-              actuator_it->actuator_type == ActuatorType::POSITION ||
-                  actuator_it->actuator_type == ActuatorType::VELOCITY,
-              "Effort command interface for the joint : %s is not supported with position or velocity actuator."
-              "Skipping it.",
+              get_logger(), actuator_it->actuator_type == ActuatorType::VELOCITY,
+              "Effort command interface for the joint : %s is not supported with velocity actuator. Skipping it.",
               actuator_name.c_str());
           if (actuator_it->actuator_type == ActuatorType::MOTOR || actuator_it->actuator_type == ActuatorType::CUSTOM)
           {
@@ -2617,7 +2783,10 @@ void MujocoSystemInterface::set_initial_pose()
     }
     if (actuator.is_position_control_enabled)
     {
-      simulation_->data()->ctrl[actuator.mj_actuator_id] = actuator.position_interface.state_;
+      // qpos, not the state: a joint without a position state interface has a NaN state, and qpos holds the
+      // start pose either way.
+      actuator.mit_hold_target = simulation_->data()->qpos[actuator.mj_pos_adr];
+      simulation_->data()->ctrl[actuator.mj_actuator_id] = actuator.mit_hold_target;
     }
     else if (actuator.is_velocity_control_enabled)
     {
@@ -2646,6 +2815,7 @@ void MujocoSystemInterface::reset_simulation_state(bool /*fill_initial_state*/)
     actuator.position_interface.state_ = simulation_->data()->qpos[actuator.mj_pos_adr];
     actuator.velocity_interface.state_ = simulation_->data()->qvel[actuator.mj_vel_adr];
     actuator.effort_interface.state_ = 0.0;
+    actuator.mit_hold_target = actuator.position_interface.state_;
 
     // Reset PID internal state
     if (actuator.pos_pid)
@@ -2661,6 +2831,12 @@ void MujocoSystemInterface::reset_simulation_state(bool /*fill_initial_state*/)
     {
       actuator.is_position_pid_control_enabled = actuator.has_pos_pid;
       actuator.is_position_control_enabled = !actuator.has_pos_pid && actuator.actuator_type == ActuatorType::POSITION;
+      // The claims stay: the controllers that made them stay active, and no switch follows a reset.
+      actuator.mit_holding = actuator.is_position_control_enabled && !actuator.mit_position_claimed &&
+                             !actuator.mit_velocity_claimed && !actuator.mit_effort_claimed;
+      // Re-stage on the next write(): the model may still hold another mode's gains.
+      actuator.mit_staged_kp = std::numeric_limits<double>::quiet_NaN();
+      actuator.mit_staged_kd = std::numeric_limits<double>::quiet_NaN();
       actuator.is_velocity_pid_control_enabled = !actuator.has_pos_pid && actuator.has_vel_pid;
       actuator.is_velocity_control_enabled =
           !actuator.has_pos_pid && !actuator.has_vel_pid && actuator.actuator_type == ActuatorType::VELOCITY;
