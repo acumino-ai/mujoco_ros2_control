@@ -26,6 +26,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <hardware_interface/hardware_info.hpp>
@@ -307,5 +308,36 @@ TEST_F(MitPositionActuator, ResetKeepsOtherComponentsGainsOffOwnedActuator)
   EXPECT_DOUBLE_EQ(staged.gain, 1.0);
   EXPECT_DOUBLE_EQ(staged.bias1, 0.0);
   EXPECT_DOUBLE_EQ(staged.bias2, 0.0);
+}
+
+// An effort-only joint exports no position state, and the scene has no keyframe: the hold must still
+// target the scene's start pose, before the first write and after it.
+TEST_F(MitPositionActuator, EffortOnlyJointHoldsSceneStartPose)
+{
+  std::string model = kTestModel;
+  const std::string joint = R"(type="hinge")";
+  model.replace(model.find(joint), joint.size(), R"(type="hinge" ref="0.5")");
+  const std::string option = "<option";
+  model.replace(model.find(option), option.size(), R"(<compiler angle="radian"/><option)");
+  // Gravity on an offset link pulls it off the start pose. Following qpos would let it fall.
+  for (const auto& [from, to] : std::vector<std::pair<std::string, std::string>>{
+           { R"(gravity="0 0 0")", R"(gravity="0 0 -9.81")" },
+           { R"(axis="0 0 1")", R"(axis="0 1 0")" },
+           { R"(<geom type="box")", R"(<geom type="box" pos="0.1 0 0")" } })
+  {
+    model.replace(model.find(from), from.size(), to);
+  }
+  Rig rig(model, { "effort" });
+  ASSERT_EQ(rig.init_result, hardware_interface::CallbackReturn::SUCCESS);
+  EXPECT_DOUBLE_EQ(applied(rig.component).ctrl, 0.5);
+
+  EXPECT_TRUE(rig.commands.at("effort")->set_value(0.0));
+  for (int i = 0; i < 25; ++i)
+  {
+    EXPECT_EQ(rig.component.read(rclcpp::Time(0), rig.period), hardware_interface::return_type::OK);
+    EXPECT_EQ(rig.component.write(rclcpp::Time(0), rig.period), hardware_interface::return_type::OK);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  EXPECT_DOUBLE_EQ(applied(rig.component).ctrl, 0.5);
 }
 #endif

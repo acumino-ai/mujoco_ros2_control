@@ -125,6 +125,9 @@ struct MuJoCoActuatorData
   // Holds the start pose with kp/kd until the first claim. Not a position claim: an effort-only
   // controller would otherwise get kp*(q_start - q) on top of its torque.
   bool mit_holding{ false };
+  // The q_des when no position command is finite: the scene's start pose, then the reset pose. A joint
+  // that exports no position interface has no command to hold, and following qpos would not hold at all.
+  double mit_hold_target{ std::numeric_limits<double>::quiet_NaN() };
   // Gains last staged to the model; NaN until the first write() stages them.
   double mit_staged_kp{ std::numeric_limits<double>::quiet_NaN() };
   double mit_staged_kd{ std::numeric_limits<double>::quiet_NaN() };

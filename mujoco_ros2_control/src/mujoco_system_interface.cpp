@@ -1650,7 +1650,7 @@ void MujocoSystemInterface::write_mit_command(MuJoCoActuatorData& actuator, mjDa
   const auto finite_or = [](double value, double fallback) { return std::isfinite(value) ? value : fallback; };
   const double kp = position ? actuator.mit_kp : 0.0;
   const double kd = (position || actuator.mit_velocity_claimed) ? actuator.mit_kd : 0.0;
-  const double q_des = finite_or(actuator.position_interface.command_, control_state_.qpos[actuator.mj_pos_adr]);
+  const double q_des = finite_or(actuator.position_interface.command_, actuator.mit_hold_target);
   const double v_des = actuator.mit_velocity_claimed ? finite_or(actuator.velocity_interface.command_, 0.0) : 0.0;
   const double tau_ff = actuator.mit_effort_claimed ? finite_or(actuator.effort_interface.command_, 0.0) : 0.0;
 
@@ -1962,6 +1962,7 @@ bool MujocoSystemInterface::register_mujoco_actuators()
       seed_from_scene(actuator_data, simulation_->data());
     }
   }
+
   return true;
 }
 
@@ -2762,7 +2763,10 @@ void MujocoSystemInterface::set_initial_pose()
     }
     if (actuator.is_position_control_enabled)
     {
-      simulation_->data()->ctrl[actuator.mj_actuator_id] = actuator.position_interface.state_;
+      // qpos, not the state: a joint without a position state interface has a NaN state, and qpos holds the
+      // start pose either way.
+      actuator.mit_hold_target = simulation_->data()->qpos[actuator.mj_pos_adr];
+      simulation_->data()->ctrl[actuator.mj_actuator_id] = actuator.mit_hold_target;
     }
     else if (actuator.is_velocity_control_enabled)
     {
@@ -2791,6 +2795,7 @@ void MujocoSystemInterface::reset_simulation_state(bool /*fill_initial_state*/)
     actuator.position_interface.state_ = simulation_->data()->qpos[actuator.mj_pos_adr];
     actuator.velocity_interface.state_ = simulation_->data()->qvel[actuator.mj_vel_adr];
     actuator.effort_interface.state_ = 0.0;
+    actuator.mit_hold_target = actuator.position_interface.state_;
 
     // Reset PID internal state
     if (actuator.pos_pid)
