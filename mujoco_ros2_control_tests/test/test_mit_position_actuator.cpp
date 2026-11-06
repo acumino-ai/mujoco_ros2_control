@@ -132,8 +132,8 @@ struct Rig
 
   ~Rig() { std::filesystem::remove(kTestModelPath); }
 
-  // Calls the reset_world service, then writes again with no mode switch, as after a real reset.
-  Staged reset_world_and_write()
+  // Calls the reset_world service. Returns what the physics thread applies before the next write.
+  Staged reset_world()
   {
     const auto node = std::make_shared<rclcpp::Node>("mit_reset_client");
     const auto client =
@@ -143,6 +143,13 @@ struct Rig
     EXPECT_EQ(rclcpp::spin_until_future_complete(node, future, std::chrono::seconds(5)),
               rclcpp::FutureReturnCode::SUCCESS);
     EXPECT_TRUE(future.get()->success);
+    return applied(component);
+  }
+
+  // Calls the reset_world service, then writes again with no mode switch, as after a real reset.
+  Staged reset_world_and_write()
+  {
+    reset_world();
     // The reset set the commands to the reset state; the active controllers write theirs again.
     EXPECT_TRUE(commands.at("position")->set_value(q_des));
     EXPECT_TRUE(commands.at("velocity")->set_value(v_des));
@@ -253,5 +260,18 @@ TEST_F(MitPositionActuator, ResetWorldKeepsClaims)
   EXPECT_DOUBLE_EQ(staged.bias1, 0.0);
   EXPECT_DOUBLE_EQ(staged.bias2, 0.0);
   EXPECT_DOUBLE_EQ(staged.ctrl, Rig::tau_ff);
+}
+
+// Until the next write, the reset ctrl is a start position. Gains an effort claim left would apply it as
+// torque, so the reset restores the MJCF servo the ctrl belongs to.
+TEST_F(MitPositionActuator, ResetWorldPairsStartCtrlWithMjcfGains)
+{
+  Rig rig;
+  ASSERT_EQ(rig.init_result, hardware_interface::CallbackReturn::SUCCESS);
+  rig.switch_and_write({ "j/effort" }, {});
+  const Staged staged = rig.reset_world();
+  EXPECT_DOUBLE_EQ(staged.gain, kKp);
+  EXPECT_DOUBLE_EQ(staged.bias1, -kKp);
+  EXPECT_DOUBLE_EQ(staged.bias2, -kKd);
 }
 #endif

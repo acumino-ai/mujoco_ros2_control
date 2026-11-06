@@ -720,6 +720,13 @@ bool MujocoSimulation::initialize(rclcpp::Node::SharedPtr node, const std::strin
     ctrl_staged_.assign(mj_model_->nu, 0.0);
     qfrc_applied_staged_.assign(mj_model_->nv, 0.0);
     control_inputs_staged_ = false;
+    initial_gains_.clear();
+    for (int i = 0; i < mj_model_->nu; ++i)
+    {
+      initial_gains_.push_back({ i, mj_model_->actuator_gainprm[i * mjNGAIN],
+                                 mj_model_->actuator_biasprm[i * mjNBIAS + 1],
+                                 mj_model_->actuator_biasprm[i * mjNBIAS + 2] });
+    }
 
     if (mj_data_ && snapshot_write_ && snapshot_read_)
     {
@@ -932,6 +939,16 @@ void MujocoSimulation::reset_world_state(bool fill_initial_state,
     control_inputs_staged_ = false;
     std::fill(ctrl_staged_.begin(), ctrl_staged_.end(), 0.0);
     std::fill(qfrc_applied_staged_.begin(), qfrc_applied_staged_.end(), 0.0);
+    gains_staged_.clear();
+  }
+
+  // ctrl now holds positions. Gains left by an effort or velocity claim would apply them as torque
+  // until the next write() stages a matching pair.
+  for (const auto& g : initial_gains_)
+  {
+    mj_model_->actuator_gainprm[g.actuator_id * mjNGAIN] = g.gain;
+    mj_model_->actuator_biasprm[g.actuator_id * mjNBIAS + 1] = g.bias1;
+    mj_model_->actuator_biasprm[g.actuator_id * mjNBIAS + 2] = g.bias2;
   }
 
   // Restore simulation time to preserve ROS clock continuity

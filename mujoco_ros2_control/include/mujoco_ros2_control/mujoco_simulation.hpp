@@ -637,6 +637,8 @@ private:
   std::vector<mjtNum> initial_qpos_;
   std::vector<mjtNum> initial_qvel_;
   std::vector<mjtNum> initial_ctrl_;
+  // The MJCF gains initial_ctrl_ belongs to: the MIT law may have staged other ones since.
+  std::vector<ActuatorGains> initial_gains_;
 
   // Callback into the HW interface to perform component-side reset bookkeeping.
   ResetCallback reset_callback_;
