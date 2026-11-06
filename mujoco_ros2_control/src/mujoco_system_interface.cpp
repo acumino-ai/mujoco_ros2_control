@@ -1963,6 +1963,26 @@ bool MujocoSystemInterface::register_mujoco_actuators()
     }
   }
 
+  // Gains match by MuJoCo joint name only. Through a transmission they would need its conversion (kp/r^2 for a
+  // reducer, none for a differential), so refuse them rather than run the MJCF gains unannounced.
+  for (const auto& joint : get_hardware_info().joints)
+  {
+    if (!joint.parameters.count("kp") && !joint.parameters.count("kd"))
+    {
+      continue;
+    }
+    const bool taken = std::any_of(mujoco_actuator_data_.begin(), mujoco_actuator_data_.end(), [&](const auto& a) {
+      return a.actuator_type == ActuatorType::POSITION && a.joint_name == joint.name;
+    });
+    if (!taken)
+    {
+      RCLCPP_ERROR(get_logger(),
+                   "Joint '%s' sets kp/kd, but no <position> actuator drives a MuJoCo joint of that name. Gains "
+                   "through a transmission are not supported: set them in the MJCF.",
+                   joint.name.c_str());
+      return false;
+    }
+  }
   return true;
 }
 

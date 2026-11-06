@@ -340,4 +340,34 @@ TEST_F(MitPositionActuator, EffortOnlyJointHoldsSceneStartPose)
   }
   EXPECT_DOUBLE_EQ(applied(rig.component).ctrl, 0.5);
 }
+
+// Gains match a <position> actuator by MuJoCo joint name. Through a transmission they would need its conversion,
+// so init refuses them rather than run the MJCF gains unannounced.
+TEST_F(MitPositionActuator, GainsThroughTransmissionFailInit)
+{
+  std::ofstream(kTestModelPath) << kTestModel;
+  hardware_interface::ComponentInfo joint;
+  joint.name = "j_hw";
+  joint.type = "joint";
+  joint.command_interfaces.push_back(hardware_interface::InterfaceInfo{ .name = "position" });
+  joint.state_interfaces.push_back(hardware_interface::InterfaceInfo{ .name = "position" });
+  joint.parameters["kp"] = "50";
+  hardware_interface::TransmissionInfo transmission;
+  transmission.name = "t";
+  transmission.type = "transmission_interface/SimpleTransmission";
+  transmission.joints.push_back(hardware_interface::JointInfo{ .name = "j_hw" });
+  transmission.actuators.push_back(hardware_interface::ActuatorInfo{ .name = "j" });
+  hardware_interface::HardwareInfo info;
+  info.name = "mit_transmission";
+  info.type = "system";
+  info.joints.push_back(joint);
+  info.transmissions.push_back(transmission);
+  info.hardware_parameters["mujoco_model"] = kTestModelPath;
+  info.hardware_parameters["headless"] = "true";
+  hardware_interface::HardwareComponentInterfaceParams params;
+  params.hardware_info = info;
+  mujoco_ros2_control::MujocoSystemInterface component;
+  EXPECT_NE(component.on_init(params), hardware_interface::CallbackReturn::SUCCESS);
+  std::filesystem::remove(kTestModelPath);
+}
 #endif
