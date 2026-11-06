@@ -56,6 +56,21 @@ constexpr const char* kTestModel = R"(<?xml version="1.0"?>
 </mujoco>
 )";
 
+// Two joints, for two components that share the scene.
+constexpr const char* kTwoJointModel = R"(<?xml version="1.0"?>
+<mujoco model="test_mit_position_actuator">
+  <option timestep="0.002" gravity="0 0 0" integrator="implicitfast"/>
+  <worldbody>
+    <body name="link"><joint name="j" type="hinge" axis="0 0 1"/><geom type="box" size="0.1 0.02 0.02"/></body>
+    <body name="link_k" pos="0 0.5 0"><joint name="k" type="hinge" axis="0 0 1"/><geom type="box" size="0.1 0.02 0.02"/></body>
+  </worldbody>
+  <actuator>
+    <position name="j" joint="j" kp="100" kv="10"/>
+    <position name="k" joint="k" kp="100" kv="10"/>
+  </actuator>
+</mujoco>
+)";
+
 const std::string kTestModelPath = "/tmp/test_mit_position_actuator_model.xml";
 
 struct Staged
@@ -94,11 +109,12 @@ struct Rig
   hardware_interface::CallbackReturn init_result;
 
   explicit Rig(const std::string& model = kTestModel,
-               const std::vector<std::string>& interfaces = { "position", "velocity", "effort" })
+               const std::vector<std::string>& interfaces = { "position", "velocity", "effort" },
+               const std::string& joint_name = "j")
   {
     std::ofstream(kTestModelPath) << model;
     hardware_interface::ComponentInfo joint;
-    joint.name = "j";
+    joint.name = joint_name;
     joint.type = "joint";
     for (const auto& name : interfaces)
     {
@@ -106,7 +122,7 @@ struct Rig
       joint.state_interfaces.push_back(hardware_interface::InterfaceInfo{ .name = name });
     }
     hardware_interface::HardwareInfo info;
-    info.name = "mit";
+    info.name = "mit_" + joint_name;
     info.type = "system";
     info.joints.push_back(joint);
     info.hardware_parameters["mujoco_model"] = kTestModelPath;
@@ -273,5 +289,23 @@ TEST_F(MitPositionActuator, ResetWorldPairsStartCtrlWithMjcfGains)
   EXPECT_DOUBLE_EQ(staged.gain, kKp);
   EXPECT_DOUBLE_EQ(staged.bias1, -kKp);
   EXPECT_DOUBLE_EQ(staged.bias2, -kKd);
+}
+
+// After a reset every component holds the position actuators it does not own. Its hold gains must not
+// replace the owner's law: the owner's cached gains match, so it would never stage them again.
+TEST_F(MitPositionActuator, ResetKeepsOtherComponentsGainsOffOwnedActuator)
+{
+  Rig owner(kTwoJointModel, { "position", "velocity", "effort" }, "j");
+  ASSERT_EQ(owner.init_result, hardware_interface::CallbackReturn::SUCCESS);
+  Rig other(kTwoJointModel, { "position", "velocity", "effort" }, "k");
+  ASSERT_EQ(other.init_result, hardware_interface::CallbackReturn::SUCCESS);
+  owner.switch_and_write({ "j/effort" }, {});
+  owner.reset_world();
+  ASSERT_EQ(owner.component.write(rclcpp::Time(0), owner.period), hardware_interface::return_type::OK);
+  ASSERT_EQ(other.component.write(rclcpp::Time(0), other.period), hardware_interface::return_type::OK);
+  const Staged staged = applied(owner.component);
+  EXPECT_DOUBLE_EQ(staged.gain, 1.0);
+  EXPECT_DOUBLE_EQ(staged.bias1, 0.0);
+  EXPECT_DOUBLE_EQ(staged.bias2, 0.0);
 }
 #endif

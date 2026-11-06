@@ -24,6 +24,7 @@
 #include <fmt/ranges.h>
 
 #include <algorithm>
+#include <iterator>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -1693,7 +1694,13 @@ void MujocoSystemInterface::stage_control_data(mjData* control_data, const std::
   {
     std::copy(shared_->qfrc.begin(), shared_->qfrc.end(), control_data->qfrc_applied);
   }
-  simulation_->apply_control_data(control_data, gains);
+  // Gains follow the ctrl rule. After a reset every component holds the position actuators it does not
+  // own, and its hold gains would replace the owner's effort or velocity law for good: the owner's
+  // cached gains match, so it never stages again.
+  std::vector<ActuatorGains> owned;
+  std::copy_if(gains.begin(), gains.end(), std::back_inserter(owned),
+               [&](const ActuatorGains& g) { return writer(shared_->ctrl_owner[g.actuator_id]) == this; });
+  simulation_->apply_control_data(control_data, owned);
 }
 
 template <typename Fn>
