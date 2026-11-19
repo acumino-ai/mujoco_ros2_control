@@ -1902,6 +1902,12 @@ bool MujocoSystemInterface::register_mujoco_actuators()
         RCLCPP_ERROR(get_logger(), "Position actuator '%s' needs kp > 0, has %f", act_name, actuator_data.mit_kp);
         return false;
       }
+      // kd < 0 feeds energy into the joint and the sim diverges. kd == 0 is a valid undamped motor.
+      if (actuator_data.mit_kd < 0.0)
+      {
+        RCLCPP_ERROR(get_logger(), "Position actuator '%s' needs kd >= 0, has %f", act_name, actuator_data.mit_kd);
+        return false;
+      }
     }
 
     // Initialize PID controllers for actuators that have them configured

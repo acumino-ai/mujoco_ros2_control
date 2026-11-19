@@ -381,5 +381,9 @@ TEST_F(MitPositionActuator, BadGainsFailInit)
             hardware_interface::CallbackReturn::SUCCESS);
   EXPECT_NE(Rig(kTestModel, { "position" }, "j", { { "kp", "abc" } }).init_result,
             hardware_interface::CallbackReturn::SUCCESS);
+  EXPECT_NE(Rig(kTestModel, { "position" }, "j", { { "kd", "-1" } }).init_result,
+            hardware_interface::CallbackReturn::SUCCESS);
+  EXPECT_EQ(Rig(kTestModel, { "position" }, "j", { { "kd", "0" } }).init_result,
+            hardware_interface::CallbackReturn::SUCCESS);
 }
 #endif
