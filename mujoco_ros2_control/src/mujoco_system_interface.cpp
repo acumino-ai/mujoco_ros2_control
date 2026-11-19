@@ -166,6 +166,24 @@ namespace
 {
 std::mutex g_shared_simulations_mutex;
 std::map<std::string, std::weak_ptr<SharedSimulation>> g_shared_simulations;
+
+// Bare std::stod throws what() == "stod", naming neither the parameter nor the value, and reads "5abc" as 5.
+double parse_double(const std::string& value, const std::string& name)
+{
+  size_t end = 0;
+  try
+  {
+    const double parsed = std::stod(value, &end);
+    if (end == value.size())
+    {
+      return parsed;
+    }
+  }
+  catch (const std::exception&)
+  {
+  }
+  throw std::invalid_argument(name + "='" + value + "' is not a number");
+}
 }  // namespace
 
 template <typename T>
@@ -446,7 +464,7 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
 
   // Pull the initial speed factor from the hardware parameters, if present
   const double sim_speed_factor =
-      std::stod(get_hardware_parameter(get_hardware_info(), "sim_speed_factor").value_or("-1"));
+      parse_double(get_hardware_parameter(get_hardware_info(), "sim_speed_factor").value_or("-1"), "sim_speed_factor");
 
   // Check for headless mode
   const bool headless =
@@ -1860,13 +1878,23 @@ bool MujocoSystemInterface::register_mujoco_actuators()
         {
           continue;
         }
-        if (joint.parameters.count("kp"))
+        for (const auto& [key, gain] :
+             { std::pair{ "kp", &actuator_data.mit_kp }, std::pair{ "kd", &actuator_data.mit_kd } })
         {
-          actuator_data.mit_kp = std::stod(joint.parameters.at("kp"));
-        }
-        if (joint.parameters.count("kd"))
-        {
-          actuator_data.mit_kd = std::stod(joint.parameters.at("kd"));
+          const auto it = joint.parameters.find(key);
+          if (it == joint.parameters.end())
+          {
+            continue;
+          }
+          try
+          {
+            *gain = parse_double(it->second, "joint '" + joint.name + "' " + key);
+          }
+          catch (const std::invalid_argument& e)
+          {
+            RCLCPP_ERROR(get_logger(), "%s", e.what());
+            return false;
+          }
         }
       }
       if (actuator_data.mit_kp <= 0.0)
@@ -2023,7 +2051,7 @@ void MujocoSystemInterface::register_urdf_joints(const hardware_interface::Hardw
       auto param_it = joint.parameters.find("multiplier");
       if (param_it != joint.parameters.end())
       {
-        joint_data.mimic_multiplier = std::stod(joint.parameters.at("multiplier"));
+        joint_data.mimic_multiplier = parse_double(param_it->second, "joint '" + joint.name + "' multiplier");
       }
       else
       {
@@ -2086,11 +2114,11 @@ void MujocoSystemInterface::register_urdf_joints(const hardware_interface::Hardw
     // Add to the joint hw information map
     joint_hw_info_.insert(std::make_pair(joint.name, joint));
 
-    auto get_initial_value = [this](const hardware_interface::InterfaceInfo& interface_info) {
+    auto get_initial_value = [&joint](const hardware_interface::InterfaceInfo& interface_info) {
       if (!interface_info.initial_value.empty())
       {
-        double value = std::stod(interface_info.initial_value);
-        return value;
+        return parse_double(interface_info.initial_value,
+                            "joint '" + joint.name + "' " + interface_info.name + " initial_value");
       }
       else
       {
@@ -3041,7 +3069,7 @@ void MujocoSystemInterface::load_legacy_cameras(const std::vector<std::string>& 
   // Parse and inject legacy parameters into the node before we initialize
   const std::string prefix = "mujoco_plugins.mujoco_camera_plugin.";
   const double camera_publish_rate =
-      std::stod(get_hardware_parameter_or(get_hardware_info(), "camera_publish_rate", "5.0"));
+      parse_double(get_hardware_parameter_or(get_hardware_info(), "camera_publish_rate", "5.0"), "camera_publish_rate");
   if (!get_node()->has_parameter(prefix + "camera_publish_rate"))
   {
     get_node()->declare_parameter(prefix + "camera_publish_rate", camera_publish_rate);
@@ -3121,7 +3149,8 @@ void MujocoSystemInterface::load_legacy_lidar(const std::vector<std::string>& pl
 
   // Parse and inject legacy parameters into the node before we initialize
   const std::string prefix = "mujoco_plugins.rangefinder_lidar_plugin.";
-  const double publish_rate = std::stod(get_hardware_parameter_or(get_hardware_info(), "lidar_publish_rate", "5.0"));
+  const double publish_rate =
+      parse_double(get_hardware_parameter_or(get_hardware_info(), "lidar_publish_rate", "5.0"), "lidar_publish_rate");
   if (!get_node()->has_parameter(prefix + "publish_rate"))
   {
     get_node()->declare_parameter(prefix + "publish_rate", publish_rate);
@@ -3137,18 +3166,18 @@ void MujocoSystemInterface::load_legacy_lidar(const std::vector<std::string>& pl
     if (auto it = params.find("frame_name"); it != params.end() && !get_node()->has_parameter(ns + "frame_name"))
       get_node()->declare_parameter(ns + "frame_name", it->second);
     if (auto it = params.find("min_angle"); it != params.end() && !get_node()->has_parameter(ns + "min_angle"))
-      get_node()->declare_parameter(ns + "min_angle", std::stod(it->second));
+      get_node()->declare_parameter(ns + "min_angle", parse_double(it->second, ns + "min_angle"));
     if (auto it = params.find("max_angle"); it != params.end() && !get_node()->has_parameter(ns + "max_angle"))
-      get_node()->declare_parameter(ns + "max_angle", std::stod(it->second));
+      get_node()->declare_parameter(ns + "max_angle", parse_double(it->second, ns + "max_angle"));
     if (auto it = params.find("angle_increment");
         it != params.end() && !get_node()->has_parameter(ns + "angle_increment"))
-      get_node()->declare_parameter(ns + "angle_increment", std::stod(it->second));
+      get_node()->declare_parameter(ns + "angle_increment", parse_double(it->second, ns + "angle_increment"));
 
     // Optional params
     if (auto it = params.find("range_min"); it != params.end() && !get_node()->has_parameter(ns + "range_min"))
-      get_node()->declare_parameter(ns + "range_min", std::stod(it->second));
+      get_node()->declare_parameter(ns + "range_min", parse_double(it->second, ns + "range_min"));
     if (auto it = params.find("range_max"); it != params.end() && !get_node()->has_parameter(ns + "range_max"))
-      get_node()->declare_parameter(ns + "range_max", std::stod(it->second));
+      get_node()->declare_parameter(ns + "range_max", parse_double(it->second, ns + "range_max"));
     if (auto it = params.find("laserscan_topic");
         it != params.end() && !get_node()->has_parameter(ns + "laserscan_topic"))
       get_node()->declare_parameter(ns + "laserscan_topic", it->second);

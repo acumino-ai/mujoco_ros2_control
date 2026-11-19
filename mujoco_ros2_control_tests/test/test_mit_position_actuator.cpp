@@ -26,6 +26,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -111,12 +112,14 @@ struct Rig
 
   explicit Rig(const std::string& model = kTestModel,
                const std::vector<std::string>& interfaces = { "position", "velocity", "effort" },
-               const std::string& joint_name = "j")
+               const std::string& joint_name = "j",
+               const std::unordered_map<std::string, std::string>& joint_params = {})
   {
     std::ofstream(kTestModelPath) << model;
     hardware_interface::ComponentInfo joint;
     joint.name = joint_name;
     joint.type = "joint";
+    joint.parameters = joint_params;
     for (const auto& name : interfaces)
     {
       joint.command_interfaces.push_back(hardware_interface::InterfaceInfo{ .name = name });
@@ -369,5 +372,14 @@ TEST_F(MitPositionActuator, GainsThroughTransmissionFailInit)
   mujoco_ros2_control::MujocoSystemInterface component;
   EXPECT_NE(component.on_init(params), hardware_interface::CallbackReturn::SUCCESS);
   std::filesystem::remove(kTestModelPath);
+}
+
+// The kp path exercises parse_double, the parser every numeric URDF parameter uses.
+TEST_F(MitPositionActuator, BadGainsFailInit)
+{
+  EXPECT_NE(Rig(kTestModel, { "position" }, "j", { { "kp", "5abc" } }).init_result,
+            hardware_interface::CallbackReturn::SUCCESS);
+  EXPECT_NE(Rig(kTestModel, { "position" }, "j", { { "kp", "abc" } }).init_result,
+            hardware_interface::CallbackReturn::SUCCESS);
 }
 #endif
