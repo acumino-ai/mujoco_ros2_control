@@ -1320,6 +1320,14 @@ MujocoSystemInterface::perform_command_mode_switch(const std::vector<std::string
       {
         actuator_it->mit_effort_claimed = enabled;
       }
+      // The last release holds where the joint is, as the real arm stops with its controller. Without the
+      // hold, ctrl keeps the last kd*v_des or tau_ff and the joint keeps moving.
+      if (!enabled && !actuator_it->mit_position_claimed && !actuator_it->mit_velocity_claimed &&
+          !actuator_it->mit_effort_claimed)
+      {
+        actuator_it->mit_holding = true;
+        actuator_it->mit_hold_target = actuator_it->position_interface.state_;
+      }
       RCLCPP_INFO(get_logger(), "Joint %s: %s %s (position %d, velocity %d, effort %d)", joint_name.c_str(),
                   interface_type.c_str(), enabled ? "claimed" : "released", actuator_it->mit_position_claimed,
                   actuator_it->mit_velocity_claimed, actuator_it->mit_effort_claimed);
@@ -1663,8 +1671,7 @@ bool MujocoSystemInterface::claim_actuators()
 void MujocoSystemInterface::write_mit_command(MuJoCoActuatorData& actuator, mjData* control_data,
                                               std::vector<ActuatorGains>& gains)
 {
-  // Nothing claimed: keep the last ctrl and gains, as the exclusive modes do. A released position
-  // controller therefore leaves the joint holding its last target.
+  // Nothing claimed and no hold: keep the last ctrl and gains, as the exclusive modes do.
   const bool position = actuator.mit_position_claimed || actuator.mit_holding;
   if (!position && !actuator.mit_velocity_claimed && !actuator.mit_effort_claimed)
   {
@@ -1677,7 +1684,10 @@ void MujocoSystemInterface::write_mit_command(MuJoCoActuatorData& actuator, mjDa
   const auto finite_or = [](double value, double fallback) { return std::isfinite(value) ? value : fallback; };
   const double kp = position ? actuator.mit_kp : 0.0;
   const double kd = (position || actuator.mit_velocity_claimed) ? actuator.mit_kd : 0.0;
-  const double q_des = finite_or(actuator.position_interface.command_, actuator.mit_hold_target);
+  // A hold targets mit_hold_target even when a released position controller left a finite command.
+  const double q_des = actuator.mit_position_claimed
+                           ? finite_or(actuator.position_interface.command_, actuator.mit_hold_target)
+                           : actuator.mit_hold_target;
   const double v_des = actuator.mit_velocity_claimed ? finite_or(actuator.velocity_interface.command_, 0.0) : 0.0;
   const double tau_ff = actuator.mit_effort_claimed ? finite_or(actuator.effort_interface.command_, 0.0) : 0.0;
 

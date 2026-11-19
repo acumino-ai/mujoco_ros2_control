@@ -235,6 +235,35 @@ TEST_F(MitPositionActuator, FirstClaimEndsStartupHold)
   EXPECT_DOUBLE_EQ(staged.ctrl, Rig::tau_ff);
 }
 
+// Releasing the last claim holds where the joint is. Without the hold, a released velocity claim keeps
+// moving at v_des and a released effort claim keeps accelerating.
+TEST_F(MitPositionActuator, ReleasingLastClaimHoldsCurrentPose)
+{
+  for (const std::string interface : { "j/velocity", "j/effort" })
+  {
+    SCOPED_TRACE(interface);
+    Rig rig;
+    ASSERT_EQ(rig.init_result, hardware_interface::CallbackReturn::SUCCESS);
+    rig.switch_and_write({ interface }, {});
+    ASSERT_EQ(rig.component.read(rclcpp::Time(0), rig.period), hardware_interface::return_type::OK);
+    const Staged staged = rig.switch_and_write({}, { interface });
+    EXPECT_DOUBLE_EQ(staged.gain, kKp);
+    EXPECT_DOUBLE_EQ(staged.bias1, -kKp);
+    EXPECT_DOUBLE_EQ(staged.bias2, -kKd);
+    // The hold target is the pose at the last read(), not the stale position command.
+    EXPECT_NE(staged.ctrl, Rig::q_des);
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    mjModel* model = nullptr;
+    mjData* data = nullptr;
+    rig.component.get_model(model);
+    rig.component.get_data(data);
+    EXPECT_NEAR(data->qpos[0], staged.ctrl, 1e-2);
+    EXPECT_NEAR(data->qvel[0], 0.0, 1e-2);
+    mj_deleteData(data);
+    mj_deleteModel(model);
+  }
+}
+
 // MuJoCo clamps ctrl, which carries the velocity and effort terms: a ctrlrange would cut them silently.
 // Position alone stays claimable, as its ctrl is q_des.
 TEST_F(MitPositionActuator, CtrlrangeRefusesVelocityAndEffortClaims)
