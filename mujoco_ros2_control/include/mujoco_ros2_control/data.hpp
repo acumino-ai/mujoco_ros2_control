@@ -119,6 +119,9 @@ struct MuJoCoActuatorData
   // kp and kd come from the MJCF (gain, -bias2), or from the joint's kp/kd parameters.
   double mit_kp{ 0.0 };
   double mit_kd{ 0.0 };
+  // The MIT law rewrites gain, bias1 and bias2 as kp, -kp, -kd and assumes bias0 = 0, gear = 1, no
+  // dynamics. Any other <position> or <general> keeps its MJCF gains and accepts only position claims.
+  bool mit_plain{ false };
   bool mit_position_claimed{ false };
   bool mit_velocity_claimed{ false };
   bool mit_effort_claimed{ false };

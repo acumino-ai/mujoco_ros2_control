@@ -1216,6 +1216,15 @@ MujocoSystemInterface::prepare_command_mode_switch(const std::vector<std::string
       for (const auto& actuator : mujoco_actuator_data_)
       {
         if (actuator.joint_name == actuator_name && actuator.actuator_type == ActuatorType::POSITION &&
+            !actuator.mit_plain)
+        {
+          RCLCPP_ERROR(get_logger(),
+                       "Cannot claim %s: position actuator '%s' is not a plain <position> (bias0 = 0, bias1 = -kp, "
+                       "gear = 1, no dynamics), so the MIT law would change its gains.",
+                       interface_name.c_str(), actuator_name.c_str());
+          return hardware_interface::return_type::ERROR;
+        }
+        if (actuator.joint_name == actuator_name && actuator.actuator_type == ActuatorType::POSITION &&
             simulation_->model()->actuator_ctrllimited[actuator.mj_actuator_id])
         {
           RCLCPP_ERROR(get_logger(),
@@ -1672,7 +1681,8 @@ void MujocoSystemInterface::write_mit_command(MuJoCoActuatorData& actuator, mjDa
   const double v_des = actuator.mit_velocity_claimed ? finite_or(actuator.velocity_interface.command_, 0.0) : 0.0;
   const double tau_ff = actuator.mit_effort_claimed ? finite_or(actuator.effort_interface.command_, 0.0) : 0.0;
 
-  if (kp != actuator.mit_staged_kp || kd != actuator.mit_staged_kd)
+  // A non-plain actuator holds only position claims with its MJCF gains, so it never needs a restage.
+  if (actuator.mit_plain && (kp != actuator.mit_staged_kp || kd != actuator.mit_staged_kd))
   {
     // gain 1 at kp = 0, so ctrl carries the torque instead of dividing by kp.
     gains.push_back({ actuator.mj_actuator_id, kp > 0.0 ? kp : 1.0, -kp, -kd });
@@ -1871,6 +1881,9 @@ bool MujocoSystemInterface::register_mujoco_actuators()
       const auto* model = simulation_->model();
       actuator_data.mit_kp = model->actuator_gainprm[i * mjNGAIN];
       actuator_data.mit_kd = -model->actuator_biasprm[i * mjNBIAS + 2];
+      const mjtNum* bias = model->actuator_biasprm + i * mjNBIAS;
+      actuator_data.mit_plain = bias[0] == 0.0 && bias[1] == -actuator_data.mit_kp &&
+                                model->actuator_gear[6 * i] == 1.0 && model->actuator_dyntype[i] == mjDYN_NONE;
       // A deployment's motor gains (the real arm's kp/kd file) override the model's.
       for (const auto& joint : get_hardware_info().joints)
       {
@@ -1885,6 +1898,12 @@ bool MujocoSystemInterface::register_mujoco_actuators()
           if (it == joint.parameters.end())
           {
             continue;
+          }
+          if (!actuator_data.mit_plain)
+          {
+            RCLCPP_ERROR(get_logger(), "Joint '%s' sets %s, but actuator '%s' is not a plain <position> actuator",
+                         joint.name.c_str(), key, act_name);
+            return false;
           }
           try
           {

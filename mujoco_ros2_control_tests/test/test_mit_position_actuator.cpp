@@ -249,6 +249,31 @@ TEST_F(MitPositionActuator, CtrlrangeRefusesVelocityAndEffortClaims)
   EXPECT_EQ(rig.component.prepare_command_mode_switch({ "j/position" }, {}), hardware_interface::return_type::OK);
 }
 
+// A <general> with bias1 != -gain is not the MIT law's affine form: position-only must keep its MJCF
+// gains, and velocity, effort and URDF gain claims are refused.
+TEST_F(MitPositionActuator, NonPlainActuatorKeepsMjcfGains)
+{
+  std::string model = kTestModel;
+  const std::string actuator = R"(<position name="j" joint="j" kp="100" kv="10"/>)";
+  model.replace(model.find(actuator), actuator.size(),
+                R"(<general name="j" joint="j" gainprm="100" biastype="affine" biasprm="0 -50 -10"/>)");
+  {
+    Rig rig(model);
+    ASSERT_EQ(rig.init_result, hardware_interface::CallbackReturn::SUCCESS);
+    EXPECT_EQ(rig.component.prepare_command_mode_switch({ "j/effort" }, {}), hardware_interface::return_type::ERROR);
+    EXPECT_EQ(rig.component.prepare_command_mode_switch({ "j/velocity" }, {}),
+              hardware_interface::return_type::ERROR);
+    EXPECT_EQ(rig.component.prepare_command_mode_switch({ "j/position" }, {}), hardware_interface::return_type::OK);
+    const Staged staged = rig.switch_and_write({ "j/position" }, {});
+    EXPECT_DOUBLE_EQ(staged.gain, 100.0);
+    EXPECT_DOUBLE_EQ(staged.bias1, -50.0);
+    EXPECT_DOUBLE_EQ(staged.bias2, -10.0);
+    EXPECT_DOUBLE_EQ(staged.ctrl, Rig::q_des);
+  }
+  EXPECT_NE(Rig(model, { "position" }, "j", { { "kp", "50" } }).init_result,
+            hardware_interface::CallbackReturn::SUCCESS);
+}
+
 // Position is optional: a joint that exports only effort initializes and drives as a plain motor.
 TEST_F(MitPositionActuator, EffortOnlyJointDrivesAsMotor)
 {
