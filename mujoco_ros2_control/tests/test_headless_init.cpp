@@ -27,6 +27,7 @@
 #include <mujoco/mujoco.h>
 #include <hardware_interface/hardware_info.hpp>
 #include <mujoco_ros2_control/mujoco_system_interface.hpp>
+#include <mujoco_ros2_control/real_time_factor.hpp>
 #include <mujoco_ros2_control/sim_display_text.hpp>
 #include <rclcpp/rclcpp.hpp>
 
@@ -283,6 +284,36 @@ TEST(SimDisplayTextTest, ReportsPausedStatus)
       /*desired_pct=*/100.0, /*actual_pct=*/0.0, /*ncon=*/0);
 
   EXPECT_EQ(content, "Paused\n0\n0.000 s\n100.0%\n0.0%\n0");
+}
+
+TEST(RealTimeFactorWindowTest, ReportsOncePerWindow)
+{
+  mujoco_ros2_control::RealTimeFactorWindow window(10.0);
+  EXPECT_FALSE(window.update(100.0, 0.0));
+  EXPECT_FALSE(window.update(109.0, 4.5));
+  const auto factor = window.update(110.0, 5.0);
+  ASSERT_TRUE(factor);
+  EXPECT_DOUBLE_EQ(*factor, 0.5);
+  // The next window starts where the last one closed.
+  EXPECT_FALSE(window.update(115.0, 10.0));
+  EXPECT_DOUBLE_EQ(*window.update(120.0, 15.0), 1.0);
+}
+
+TEST(RealTimeFactorWindowTest, ResetDropsThePausedTime)
+{
+  mujoco_ros2_control::RealTimeFactorWindow window(10.0);
+  window.update(0.0, 0.0);
+  window.reset();  // paused from wall 0 to wall 100, sim time stands still
+  EXPECT_FALSE(window.update(100.0, 0.0));
+  EXPECT_DOUBLE_EQ(*window.update(110.0, 10.0), 1.0);
+}
+
+TEST(RealTimeFactorWindowTest, SimTimeThatJumpsBackStartsANewWindow)
+{
+  mujoco_ros2_control::RealTimeFactorWindow window(10.0);
+  window.update(0.0, 50.0);
+  EXPECT_FALSE(window.update(10.0, 0.0));  // world reset
+  EXPECT_DOUBLE_EQ(*window.update(20.0, 10.0), 1.0);
 }
 
 int main(int argc, char** argv)
