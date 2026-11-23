@@ -38,6 +38,8 @@
 #include "glfw_adapter.h"  // for mj::GlfwAdapter
 #include "simulate.h"      // must be on your include path, handled by CMake
 
+#include "mujoco_ros2_control/real_time_factor.hpp"
+
 #include <mujoco/mujoco.h>
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
@@ -53,6 +55,17 @@
 
 namespace mujoco_ros2_control
 {
+
+/**
+ * @brief Servo gains of one position actuator: force = gain * ctrl + bias1 * q + bias2 * qdot.
+ */
+struct ActuatorGains
+{
+  int actuator_id;
+  mjtNum gain;
+  mjtNum bias1;
+  mjtNum bias2;
+};
 
 namespace
 {
@@ -347,8 +360,12 @@ public:
    * are the only two fields staged here because both are "held" quantities that persist
    * correctly across a batch of steps. Anything else that requires direct access to simulation
    * data can access it through the `set_pre_step_callback` functions.
+   *
+   * @param gains Servo gains of position actuators to change before the same step that first
+   *              applies this ctrl. A gain change staged separately could meet a ctrl meant for the
+   *              other mode for one step: an effort ctrl read as a position target.
    */
-  void apply_control_data(mjData* control_data);
+  void apply_control_data(mjData* control_data, const std::vector<ActuatorGains>& gains = {});
 
   /**
    * @brief Accessor for the mutex which locks access to the data and model.
@@ -530,6 +547,8 @@ private:
   // Control inputs staged by apply_control_data, applied to mj_data_ before each step.
   std::vector<mjtNum> ctrl_staged_;
   std::vector<mjtNum> qfrc_applied_staged_;
+  // Gain changes staged with them, applied to mj_model_ by the physics thread only.
+  std::vector<ActuatorGains> gains_staged_;
 
   // False until apply_control_data is first called (and cleared on reset), so that initial /
   // reset ctrl values in mj_data_ are not clobbered by stale staging buffers.
@@ -612,6 +631,8 @@ private:
   std::atomic<bool> steps_interrupted_{ false };
   std::atomic<bool> keyboard_step_requested_{ false };
   std::atomic<uint64_t> step_count_{ 0 };
+  // Wall seconds per window. One window also bounds the slow-sim warning to one line.
+  RealTimeFactorWindow rtf_window_{ 10.0 };
   std::mutex steps_cv_mutex_;
   std::condition_variable steps_cv_;
 
@@ -619,6 +640,8 @@ private:
   std::vector<mjtNum> initial_qpos_;
   std::vector<mjtNum> initial_qvel_;
   std::vector<mjtNum> initial_ctrl_;
+  // The MJCF gains initial_ctrl_ belongs to: the MIT law may have staged other ones since.
+  std::vector<ActuatorGains> initial_gains_;
 
   // Callback into the HW interface to perform component-side reset bookkeeping.
   ResetCallback reset_callback_;
