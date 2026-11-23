@@ -38,6 +38,8 @@
 #include "glfw_adapter.h"  // for mj::GlfwAdapter
 #include "simulate.h"      // must be on your include path, handled by CMake
 
+#include "mujoco_ros2_control/real_time_factor.hpp"
+
 #include <mujoco/mujoco.h>
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
@@ -630,6 +632,8 @@ private:
   std::atomic<bool> steps_interrupted_{ false };
   std::atomic<bool> keyboard_step_requested_{ false };
   std::atomic<uint64_t> step_count_{ 0 };
+  // Wall seconds per window. One window also bounds the slow-sim warning to one line.
+  RealTimeFactorWindow rtf_window_{ 10.0 };
   std::mutex steps_cv_mutex_;
   std::condition_variable steps_cv_;
 

@@ -65,6 +65,7 @@ using namespace std::chrono_literals;
 const double kSyncMisalign = 0.1;        // maximum misalignment before re-sync (simulation seconds)
 const double kSimRefreshFraction = 0.7;  // fraction of refresh available for simulation
 const int kErrorLength = 1024;           // load error string length
+const double kRtfWarnBelow = 0.9;        // warn below this fraction of the target speed
 
 using Seconds = std::chrono::duration<double>;
 
@@ -1571,6 +1572,10 @@ void MujocoSimulation::physics_loop()
             // re-sync
             syncCPU = startCPU;
             syncSim = mj_data_->time;
+            if (sim_->speed_changed)
+            {
+              rtf_window_.reset();  // a window must not mix two target speeds
+            }
             sim_->speed_changed = false;
 
             apply_staged_control_inputs();
@@ -1663,12 +1668,25 @@ void MujocoSimulation::physics_loop()
             apply_staged_control_inputs();
             sim_->AddToHistory();
             update_sim_display();
+
+            // Below real time a control period covers less sim time than the controllers assume, and
+            // the re-sync above drops the backlog without a trace. speedFactor converts to the target.
+            const auto rtf = rtf_window_.update(Seconds(startCPU.time_since_epoch()).count(), mj_data_->time);
+            if (rtf && *rtf * speedFactor < kRtfWarnBelow)
+            {
+              RCLCPP_WARN(get_logger(),
+                          "MuJoCo runs at %.0f%% of its target speed. The controllers step on the wall clock, so "
+                          "their gains act as if the plant were faster. Check the number of arms, the viewer, and "
+                          "the CPU load.",
+                          *rtf * speedFactor * 100.0);
+            }
           }
         }
 
         // paused
         else
         {
+          rtf_window_.reset();
           // Translate keyboard 'S' presses into single pending steps.
           if (keyboard_step_requested_.exchange(false))
           {
