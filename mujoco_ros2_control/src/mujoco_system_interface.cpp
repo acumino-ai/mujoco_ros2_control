@@ -24,10 +24,10 @@
 #include <fmt/ranges.h>
 
 #include <algorithm>
-#include <iterator>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -1685,9 +1685,9 @@ void MujocoSystemInterface::write_mit_command(MuJoCoActuatorData& actuator, mjDa
   const double kp = position ? actuator.mit_kp : 0.0;
   const double kd = (position || actuator.mit_velocity_claimed) ? actuator.mit_kd : 0.0;
   // A hold targets mit_hold_target even when a released position controller left a finite command.
-  const double q_des = actuator.mit_position_claimed
-                           ? finite_or(actuator.position_interface.command_, actuator.mit_hold_target)
-                           : actuator.mit_hold_target;
+  const double q_des = actuator.mit_position_claimed ?
+                           finite_or(actuator.position_interface.command_, actuator.mit_hold_target) :
+                           actuator.mit_hold_target;
   const double v_des = actuator.mit_velocity_claimed ? finite_or(actuator.velocity_interface.command_, 0.0) : 0.0;
   const double tau_ff = actuator.mit_effort_claimed ? finite_or(actuator.effort_interface.command_, 0.0) : 0.0;
 
@@ -1699,8 +1699,7 @@ void MujocoSystemInterface::write_mit_command(MuJoCoActuatorData& actuator, mjDa
     actuator.mit_staged_kp = kp;
     actuator.mit_staged_kd = kd;
   }
-  control_data->ctrl[actuator.mj_actuator_id] =
-      kp > 0.0 ? q_des + (kd * v_des + tau_ff) / kp : kd * v_des + tau_ff;
+  control_data->ctrl[actuator.mj_actuator_id] = kp > 0.0 ? q_des + (kd * v_des + tau_ff) / kp : kd * v_des + tau_ff;
 }
 
 void MujocoSystemInterface::stage_control_data(mjData* control_data, const std::vector<ActuatorGains>& gains)

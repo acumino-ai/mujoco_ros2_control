@@ -367,7 +367,6 @@ public:
    */
   void apply_control_data(mjData* control_data, const std::vector<ActuatorGains>& gains = {});
 
-
   /**
    * @brief Accessor for the mutex which locks access to the data and model.
    */

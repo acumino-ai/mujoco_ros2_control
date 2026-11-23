@@ -30,8 +30,8 @@
 #include <utility>
 #include <vector>
 
-#include <hardware_interface/hardware_info.hpp>
 #include <hardware_interface/version.h>
+#include <hardware_interface/hardware_info.hpp>
 #include <rclcpp/rclcpp.hpp>
 
 #include <mujoco_ros2_control/mujoco_system_interface.hpp>
@@ -150,7 +150,10 @@ struct Rig
     }
   }
 
-  ~Rig() { std::filesystem::remove(kTestModelPath); }
+  ~Rig()
+  {
+    std::filesystem::remove(kTestModelPath);
+  }
 
   // Calls the reset_world service. Returns what the physics thread applies before the next write.
   Staged reset_world()
@@ -191,8 +194,14 @@ struct Rig
 class MitPositionActuator : public ::testing::Test
 {
 protected:
-  static void SetUpTestSuite() { rclcpp::init(0, nullptr); }
-  static void TearDownTestSuite() { rclcpp::shutdown(); }
+  static void SetUpTestSuite()
+  {
+    rclcpp::init(0, nullptr);
+  }
+  static void TearDownTestSuite()
+  {
+    rclcpp::shutdown();
+  }
 };
 
 TEST_F(MitPositionActuator, ClaimedInterfacesCombineIntoOneLaw)
@@ -290,8 +299,7 @@ TEST_F(MitPositionActuator, NonPlainActuatorKeepsMjcfGains)
     Rig rig(model);
     ASSERT_EQ(rig.init_result, hardware_interface::CallbackReturn::SUCCESS);
     EXPECT_EQ(rig.component.prepare_command_mode_switch({ "j/effort" }, {}), hardware_interface::return_type::ERROR);
-    EXPECT_EQ(rig.component.prepare_command_mode_switch({ "j/velocity" }, {}),
-              hardware_interface::return_type::ERROR);
+    EXPECT_EQ(rig.component.prepare_command_mode_switch({ "j/velocity" }, {}), hardware_interface::return_type::ERROR);
     EXPECT_EQ(rig.component.prepare_command_mode_switch({ "j/position" }, {}), hardware_interface::return_type::OK);
     const Staged staged = rig.switch_and_write({ "j/position" }, {});
     EXPECT_DOUBLE_EQ(staged.gain, 100.0);
